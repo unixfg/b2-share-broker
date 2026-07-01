@@ -44,6 +44,7 @@ func (s fakeStore) HeadObject(context.Context, string) (ObjectMetadata, error) {
 func testConfig() Config {
 	return Config{
 		B2PublicBaseURL: "https://bucket.s3.us-west-004.backblazeb2.com",
+		PublicBaseURL:   "https://share.doesthings.online",
 		ObjectPrefix:    "share-broker",
 		MaxUploadBytes:  1024,
 		PresignTTL:      15 * time.Minute,
@@ -104,6 +105,12 @@ func TestCreateUpload(t *testing.T) {
 	}
 	if response.PublicURL == "" || response.UploadToken == "" {
 		t.Fatalf("response missing public URL or token: %#v", response)
+	}
+	if !strings.HasPrefix(response.PublicURL, "https://share.doesthings.online/s/share-broker/") {
+		t.Fatalf("public URL = %q", response.PublicURL)
+	}
+	if !strings.Contains(response.PublicURL, "/Screenshot_1.png") {
+		t.Fatalf("public URL = %q", response.PublicURL)
 	}
 }
 
@@ -166,6 +173,9 @@ func TestCompleteUploadReturnsVerifiedMetadata(t *testing.T) {
 	if !response.Verified || response.Size != 12 || response.ETag != "abc123" {
 		t.Fatalf("response = %#v", response)
 	}
+	if response.PublicURL != "https://share.doesthings.online/s/share-broker/2026/06/28/01J00000000000000000000000/a.txt" {
+		t.Fatalf("public URL = %q", response.PublicURL)
+	}
 }
 
 func TestCompleteUploadAllowsBestEffortHeadFailure(t *testing.T) {
@@ -193,5 +203,48 @@ func TestCompleteUploadAllowsBestEffortHeadFailure(t *testing.T) {
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestPublicShareRedirectsToNativeB2URL(t *testing.T) {
+	server := NewServer(testConfig(), fakeAuth{err: ErrUnauthorized}, fakeStore{}, slog.Default())
+	request := httptest.NewRequest(http.MethodGet, "/s/share-broker/2026/06/28/01J00000000000000000000000/file%20name.txt", nil)
+	recorder := httptest.NewRecorder()
+
+	server.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusFound {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	want := "https://bucket.s3.us-west-004.backblazeb2.com/share-broker/2026/06/28/01J00000000000000000000000/file%20name.txt"
+	if got := recorder.Header().Get("Location"); got != want {
+		t.Fatalf("location = %q, want %q", got, want)
+	}
+}
+
+func TestPublicShareHeadRedirectsToNativeB2URL(t *testing.T) {
+	server := NewServer(testConfig(), fakeAuth{err: ErrUnauthorized}, fakeStore{}, slog.Default())
+	request := httptest.NewRequest(http.MethodHead, "/s/share-broker/key.txt", nil)
+	recorder := httptest.NewRecorder()
+
+	server.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusFound {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	if got := recorder.Header().Get("Location"); got != "https://bucket.s3.us-west-004.backblazeb2.com/share-broker/key.txt" {
+		t.Fatalf("location = %q", got)
+	}
+}
+
+func TestPublicShareRejectsObjectsOutsideConfiguredPrefix(t *testing.T) {
+	server := NewServer(testConfig(), fakeAuth{err: ErrUnauthorized}, fakeStore{}, slog.Default())
+	request := httptest.NewRequest(http.MethodGet, "/s/other-prefix/key.txt", nil)
+	recorder := httptest.NewRecorder()
+
+	server.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusNotFound)
 	}
 }

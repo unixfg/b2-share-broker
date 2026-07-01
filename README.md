@@ -5,13 +5,20 @@ public Backblaze B2 bucket.
 
 The broker never handles file bytes. Clients authenticate to the broker, ask for
 a presigned S3-compatible PUT URL, upload directly to B2, then receive the
-public B2 URL to copy or share.
+public share URL to copy or share.
 
 ## API
 
 ### `GET /healthz`
 
 Unauthenticated health check.
+
+### `GET /s/{objectKey}`
+
+Unauthenticated public share link. The broker validates that `objectKey` is
+under the configured `OBJECT_PREFIX` and redirects to the native public B2 URL.
+
+The cluster does not proxy downloaded file bytes.
 
 ### `POST /api/uploads`
 
@@ -37,7 +44,7 @@ Response:
   },
   "objectKey": "share-broker/2026/06/28/01J.../Screenshot_1.png",
   "uploadToken": "...",
-  "publicUrl": "https://bucket.s3.us-west-004.backblazeb2.com/share-broker/..."
+  "publicUrl": "https://share.doesthings.online/s/share-broker/..."
 }
 ```
 
@@ -61,7 +68,7 @@ Response:
 ```json
 {
   "objectKey": "share-broker/2026/06/28/01J.../Screenshot_1.png",
-  "publicUrl": "https://bucket.s3.us-west-004.backblazeb2.com/share-broker/...",
+  "publicUrl": "https://share.doesthings.online/s/share-broker/...",
   "verified": true,
   "size": 12345,
   "etag": "..."
@@ -84,8 +91,11 @@ Required environment variables:
   `https://s3.us-west-004.backblazeb2.com`
 - `B2_REGION`: defaults to `us-west-004`
 - `B2_BUCKET`: existing public B2 bucket name
-- `B2_PUBLIC_BASE_URL`: native public base URL for the bucket, for example
+- `B2_PUBLIC_BASE_URL`: native public base URL for redirects to the bucket, for
+  example
   `https://<bucket>.s3.us-west-004.backblazeb2.com`
+- `PUBLIC_BASE_URL`: public base URL returned to users, for bees
+  `https://share.doesthings.online`; defaults to `B2_PUBLIC_BASE_URL`
 - `AWS_ACCESS_KEY_ID` or `ACCESS_KEY_ID`: B2 application key ID
 - `AWS_SECRET_ACCESS_KEY` or `ACCESS_SECRET_KEY`: B2 application key
 - `UPLOAD_TOKEN_KEY`: at least 32 bytes, or base64 encoding of at least 32 bytes
@@ -140,6 +150,10 @@ Minimum client settings:
 After the first login, inspect the token subject and set
 `OIDC_ALLOWED_SUBJECTS` in the GitOps ConfigMap.
 
+This client is for the native CLI flow. If a hosted browser UI is added later,
+create a separate public web client with a redirect URI on
+`https://share.doesthings.online/auth/callback`.
+
 ## GitOps Deployment
 
 The bees deployment lives in `github.com/unixfg/gitops` under
@@ -161,4 +175,3 @@ go build ./cmd/b2-share
 
 Add a separate PeerTube-oriented upload profile later. Do not reuse the generic
 share bucket/prefix for PeerTube publishing without an explicit policy decision.
-

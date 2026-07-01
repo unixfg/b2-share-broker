@@ -32,6 +32,7 @@ type Config struct {
 	B2Region          string
 	B2Bucket          string
 	B2PublicBaseURL   string
+	PublicBaseURL     string
 	B2AccessKeyID     string
 	B2SecretAccessKey string
 	ObjectPrefix      string
@@ -58,6 +59,7 @@ func LoadConfigFromEnv() (Config, error) {
 		return Config{}, err
 	}
 
+	b2PublicBaseURL := strings.TrimRight(envString("B2_PUBLIC_BASE_URL", ""), "/")
 	cfg := Config{
 		ListenAddr:        listenAddr,
 		IssuerURL:         envString("OIDC_ISSUER_URL", ""),
@@ -66,7 +68,8 @@ func LoadConfigFromEnv() (Config, error) {
 		B2Endpoint:        strings.TrimRight(envString("B2_ENDPOINT", ""), "/"),
 		B2Region:          envString("B2_REGION", defaultRegion),
 		B2Bucket:          envString("B2_BUCKET", ""),
-		B2PublicBaseURL:   strings.TrimRight(envString("B2_PUBLIC_BASE_URL", ""), "/"),
+		B2PublicBaseURL:   b2PublicBaseURL,
+		PublicBaseURL:     strings.TrimRight(envString("PUBLIC_BASE_URL", b2PublicBaseURL), "/"),
 		B2AccessKeyID:     firstEnv("AWS_ACCESS_KEY_ID", "ACCESS_KEY_ID"),
 		B2SecretAccessKey: firstEnv("AWS_SECRET_ACCESS_KEY", "ACCESS_SECRET_KEY"),
 		ObjectPrefix:      strings.Trim(envString("OBJECT_PREFIX", defaultObjectPrefix), "/"),
@@ -94,6 +97,7 @@ func (c Config) Validate() error {
 	require("B2_ENDPOINT", c.B2Endpoint)
 	require("B2_BUCKET", c.B2Bucket)
 	require("B2_PUBLIC_BASE_URL", c.B2PublicBaseURL)
+	require("PUBLIC_BASE_URL", c.PublicBaseURL)
 	require("AWS_ACCESS_KEY_ID or ACCESS_KEY_ID", c.B2AccessKeyID)
 	require("AWS_SECRET_ACCESS_KEY or ACCESS_SECRET_KEY", c.B2SecretAccessKey)
 	if len(c.UploadTokenKey) < minUploadTokenKeyBytes {
@@ -114,6 +118,9 @@ func (c Config) Validate() error {
 	}
 	if _, err := url.ParseRequestURI(c.B2PublicBaseURL); err != nil {
 		return fmt.Errorf("B2_PUBLIC_BASE_URL is invalid: %w", err)
+	}
+	if _, err := url.ParseRequestURI(c.PublicBaseURL); err != nil {
+		return fmt.Errorf("PUBLIC_BASE_URL is invalid: %w", err)
 	}
 	if c.MaxUploadBytes <= 0 {
 		return errors.New("MAX_UPLOAD_BYTES must be positive")

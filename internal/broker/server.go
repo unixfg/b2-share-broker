@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 )
 
@@ -55,6 +56,7 @@ func NewServer(cfg Config, auth Authenticator, store ObjectStore, logger *slog.L
 		mux:    http.NewServeMux(),
 	}
 	server.mux.HandleFunc("/healthz", server.handleHealthz)
+	server.mux.HandleFunc("/s/", server.handlePublicShare)
 	server.mux.HandleFunc("/api/uploads", server.handleCreateUpload)
 	server.mux.HandleFunc("/api/uploads/complete", server.handleCompleteUpload)
 	return server
@@ -75,6 +77,20 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
 		_, _ = w.Write([]byte("ok\n"))
 	}
+}
+
+func (s *Server) handlePublicShare(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD")
+		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	objectKey, ok := objectKeyFromSharePath(r.URL.EscapedPath(), s.cfg.ObjectPrefix)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	http.Redirect(w, r, PublicURL(s.cfg.B2PublicBaseURL, objectKey), http.StatusFound)
 }
 
 func (s *Server) handleCreateUpload(w http.ResponseWriter, r *http.Request) {
@@ -142,7 +158,7 @@ func (s *Server) handleCreateUpload(w http.ResponseWriter, r *http.Request) {
 		RequiredHeaders: requiredHeaders(presigned.Header),
 		ObjectKey:       objectKey,
 		UploadToken:     uploadToken,
-		PublicURL:       PublicURL(s.cfg.B2PublicBaseURL, objectKey),
+		PublicURL:       ShareURL(s.cfg.PublicBaseURL, objectKey),
 	})
 }
 
@@ -174,7 +190,7 @@ func (s *Server) handleCompleteUpload(w http.ResponseWriter, r *http.Request) {
 
 	response := completeUploadResponse{
 		ObjectKey: payload.ObjectKey,
-		PublicURL: PublicURL(s.cfg.B2PublicBaseURL, payload.ObjectKey),
+		PublicURL: ShareURL(s.cfg.PublicBaseURL, payload.ObjectKey),
 	}
 	metadata, err := s.store.HeadObject(r.Context(), payload.ObjectKey)
 	if err != nil {
@@ -186,6 +202,35 @@ func (s *Server) handleCompleteUpload(w http.ResponseWriter, r *http.Request) {
 	response.Size = metadata.ContentLength
 	response.ETag = metadata.ETag
 	writeJSON(w, http.StatusOK, response)
+}
+
+func objectKeyFromSharePath(escapedPath, objectPrefix string) (string, bool) {
+	const sharePrefix = "/s/"
+	if !strings.HasPrefix(escapedPath, sharePrefix) {
+		return "", false
+	}
+	escapedObjectKey := strings.TrimPrefix(escapedPath, sharePrefix)
+	if escapedObjectKey == "" {
+		return "", false
+	}
+	segments := strings.Split(escapedObjectKey, "/")
+	decoded := make([]string, 0, len(segments))
+	for _, segment := range segments {
+		if segment == "" {
+			return "", false
+		}
+		value, err := url.PathUnescape(segment)
+		if err != nil || value == "" || strings.Contains(value, "/") {
+			return "", false
+		}
+		decoded = append(decoded, value)
+	}
+	objectKey := strings.Join(decoded, "/")
+	prefix := strings.Trim(objectPrefix, "/")
+	if objectKey == prefix || strings.HasPrefix(objectKey, prefix+"/") {
+		return objectKey, true
+	}
+	return "", false
 }
 
 func decodeJSONBody(w http.ResponseWriter, r *http.Request, target any) error {

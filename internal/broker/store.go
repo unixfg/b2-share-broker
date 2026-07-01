@@ -96,3 +96,7 @@ func PublicURL(baseURL, objectKey string) string {
 	}
 	return baseURL + "/" + strings.Join(segments, "/")
 }
+
+func ShareURL(baseURL, objectKey string) string {
+	return PublicURL(baseURL, "s/"+strings.Trim(objectKey, "/"))
+}
