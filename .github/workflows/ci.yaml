@@ -30,8 +30,6 @@ jobs:
         run: go test ./...
       - name: Build broker
         run: go build ./cmd/b2-share-broker
-      - name: Build CLI
-        run: go build ./cmd/b2-share
 
   image:
     runs-on: ubuntu-latest

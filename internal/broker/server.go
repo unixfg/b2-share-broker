@@ -13,6 +13,7 @@ import (
 type Server struct {
 	cfg    Config
 	auth   Authenticator
+	login  *OIDCLogin
 	store  ObjectStore
 	logger *slog.Logger
 	mux    *http.ServeMux
@@ -45,20 +46,31 @@ type completeUploadResponse struct {
 }
 
 func NewServer(cfg Config, auth Authenticator, store ObjectStore, logger *slog.Logger) *Server {
+	return NewServerWithLogin(cfg, auth, nil, store, logger)
+}
+
+func NewServerWithLogin(cfg Config, auth Authenticator, login *OIDCLogin, store ObjectStore, logger *slog.Logger) *Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	server := &Server{
 		cfg:    cfg,
 		auth:   auth,
+		login:  login,
 		store:  store,
 		logger: logger,
 		mux:    http.NewServeMux(),
 	}
 	server.mux.HandleFunc("/healthz", server.handleHealthz)
 	server.mux.HandleFunc("/s/", server.handlePublicShare)
+	server.mux.HandleFunc("/auth/login", server.handleLogin)
+	server.mux.HandleFunc("/auth/callback", server.handleCallback)
+	server.mux.HandleFunc("/auth/logout", server.handleLogout)
+	server.mux.HandleFunc("/api/session", server.handleSession)
 	server.mux.HandleFunc("/api/uploads", server.handleCreateUpload)
 	server.mux.HandleFunc("/api/uploads/complete", server.handleCompleteUpload)
+	server.mux.HandleFunc("/share-target", server.handleShareTargetFallback)
+	server.registerWebRoutes()
 	return server
 }
 
@@ -93,14 +105,66 @@ func (s *Server) handlePublicShare(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, PublicURL(s.cfg.B2PublicBaseURL, objectKey), http.StatusFound)
 }
 
+func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	if s.login == nil {
+		writeJSONError(w, http.StatusServiceUnavailable, "login is not configured")
+		return
+	}
+	s.login.Start(w, r)
+}
+
+func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
+	if s.login == nil {
+		writeJSONError(w, http.StatusServiceUnavailable, "login is not configured")
+		return
+	}
+	s.login.Complete(w, r)
+}
+
+func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	if s.login == nil {
+		writeJSONError(w, http.StatusServiceUnavailable, "login is not configured")
+		return
+	}
+	s.login.Logout(w, r)
+}
+
+type sessionResponse struct {
+	Authenticated bool      `json:"authenticated"`
+	User          Principal `json:"user,omitempty"`
+	CSRFToken     string    `json:"csrfToken,omitempty"`
+}
+
+func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD")
+		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	authenticated, err := s.auth.Authenticate(r)
+	if err != nil {
+		writeJSON(w, http.StatusOK, sessionResponse{Authenticated: false})
+		return
+	}
+	writeJSON(w, http.StatusOK, sessionResponse{
+		Authenticated: true,
+		User:          authenticated.Principal,
+		CSRFToken:     authenticated.CSRFToken,
+	})
+}
+
 func (s *Server) handleCreateUpload(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", "POST")
 		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	principal, err := s.auth.Authenticate(r.Context(), r.Header.Get("Authorization"))
+	authenticated, err := s.auth.Authenticate(r)
 	if err != nil {
+		writeAuthError(w, err)
+		return
+	}
+	if err := requireCSRF(authenticated, r); err != nil {
 		writeAuthError(w, err)
 		return
 	}
@@ -144,7 +208,7 @@ func (s *Server) handleCreateUpload(w http.ResponseWriter, r *http.Request) {
 		ObjectKey:   objectKey,
 		ContentType: request.ContentType,
 		Size:        request.Size,
-		Subject:     principal.Subject,
+		Subject:     authenticated.Principal.Subject,
 		ExpiresAt:   now.Add(s.cfg.UploadTokenTTL).Unix(),
 	})
 	if err != nil {
@@ -168,8 +232,12 @@ func (s *Server) handleCompleteUpload(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	principal, err := s.auth.Authenticate(r.Context(), r.Header.Get("Authorization"))
+	authenticated, err := s.auth.Authenticate(r)
 	if err != nil {
+		writeAuthError(w, err)
+		return
+	}
+	if err := requireCSRF(authenticated, r); err != nil {
 		writeAuthError(w, err)
 		return
 	}
@@ -183,7 +251,7 @@ func (s *Server) handleCompleteUpload(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "invalid upload token")
 		return
 	}
-	if payload.Subject != principal.Subject {
+	if payload.Subject != authenticated.Principal.Subject {
 		writeJSONError(w, http.StatusForbidden, "upload token does not belong to this principal")
 		return
 	}
@@ -202,6 +270,19 @@ func (s *Server) handleCompleteUpload(w http.ResponseWriter, r *http.Request) {
 	response.Size = metadata.ContentLength
 	response.ETag = metadata.ETag
 	writeJSON(w, http.StatusOK, response)
+}
+
+func (s *Server) handleShareTargetFallback(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet || r.Method == http.MethodHead {
+		http.Redirect(w, r, "/share", http.StatusFound)
+		return
+	}
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", "GET, HEAD, POST")
+		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	writeJSONError(w, http.StatusBadRequest, "install the web app before using it as a share target")
 }
 
 func objectKeyFromSharePath(escapedPath, objectPrefix string) (string, bool) {

@@ -20,13 +20,15 @@ const (
 	defaultObjectPrefix    = "share-broker"
 	defaultPresignTTL      = 15 * time.Minute
 	defaultUploadTokenTTL  = time.Hour
+	defaultSessionTTL      = 12 * time.Hour
 	minUploadTokenKeyBytes = 32
 )
 
 type Config struct {
 	ListenAddr        string
 	IssuerURL         string
-	Audience          string
+	OIDCClientID      string
+	OIDCClientSecret  string
 	AllowedSubjects   []string
 	B2Endpoint        string
 	B2Region          string
@@ -40,6 +42,8 @@ type Config struct {
 	PresignTTL        time.Duration
 	UploadTokenTTL    time.Duration
 	UploadTokenKey    []byte
+	SessionTTL        time.Duration
+	SessionAuthKey    []byte
 	Clock             func() time.Time
 	Entropy           io.Reader
 }
@@ -58,12 +62,17 @@ func LoadConfigFromEnv() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	sessionAuthKey, err := parseSecretKey(os.Getenv("SESSION_AUTH_KEY"))
+	if err != nil {
+		return Config{}, err
+	}
 
 	b2PublicBaseURL := strings.TrimRight(envString("B2_PUBLIC_BASE_URL", ""), "/")
 	cfg := Config{
 		ListenAddr:        listenAddr,
 		IssuerURL:         envString("OIDC_ISSUER_URL", ""),
-		Audience:          envString("OIDC_AUDIENCE", ""),
+		OIDCClientID:      firstEnv("OIDC_CLIENT_ID", "OIDC_AUDIENCE"),
+		OIDCClientSecret:  envString("OIDC_CLIENT_SECRET", ""),
 		AllowedSubjects:   envList("OIDC_ALLOWED_SUBJECTS"),
 		B2Endpoint:        strings.TrimRight(envString("B2_ENDPOINT", ""), "/"),
 		B2Region:          envString("B2_REGION", defaultRegion),
@@ -77,6 +86,8 @@ func LoadConfigFromEnv() (Config, error) {
 		PresignTTL:        envDurationSeconds("PRESIGN_TTL_SECONDS", defaultPresignTTL),
 		UploadTokenTTL:    envDurationSeconds("UPLOAD_TOKEN_TTL_SECONDS", defaultUploadTokenTTL),
 		UploadTokenKey:    tokenKey,
+		SessionTTL:        envDurationSeconds("SESSION_TTL_SECONDS", defaultSessionTTL),
+		SessionAuthKey:    sessionAuthKey,
 		Clock:             time.Now,
 		Entropy:           rand.Reader,
 	}
@@ -93,7 +104,8 @@ func (c Config) Validate() error {
 	}
 
 	require("OIDC_ISSUER_URL", c.IssuerURL)
-	require("OIDC_AUDIENCE", c.Audience)
+	require("OIDC_CLIENT_ID", c.OIDCClientID)
+	require("OIDC_CLIENT_SECRET", c.OIDCClientSecret)
 	require("B2_ENDPOINT", c.B2Endpoint)
 	require("B2_BUCKET", c.B2Bucket)
 	require("B2_PUBLIC_BASE_URL", c.B2PublicBaseURL)
@@ -102,6 +114,9 @@ func (c Config) Validate() error {
 	require("AWS_SECRET_ACCESS_KEY or ACCESS_SECRET_KEY", c.B2SecretAccessKey)
 	if len(c.UploadTokenKey) < minUploadTokenKeyBytes {
 		missing = append(missing, "UPLOAD_TOKEN_KEY")
+	}
+	if len(c.SessionAuthKey) < minUploadTokenKeyBytes {
+		missing = append(missing, "SESSION_AUTH_KEY")
 	}
 	if len(c.AllowedSubjects) == 0 {
 		missing = append(missing, "OIDC_ALLOWED_SUBJECTS")
@@ -130,6 +145,9 @@ func (c Config) Validate() error {
 	}
 	if c.UploadTokenTTL <= 0 {
 		return errors.New("UPLOAD_TOKEN_TTL_SECONDS must be positive")
+	}
+	if c.SessionTTL <= 0 {
+		return errors.New("SESSION_TTL_SECONDS must be positive")
 	}
 	if c.ObjectPrefix == "" {
 		return errors.New("OBJECT_PREFIX must not be empty")

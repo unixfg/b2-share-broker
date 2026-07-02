@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#f7f4ee">
+    <title>Share</title>
+    <link rel="manifest" href="/manifest.webmanifest">
+    <link rel="icon" href="/assets/icon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="/assets/app.css">
+    <script src="/assets/app.js" defer></script>
+  </head>
+  <body>
+    <div class="shell">
+      <header class="topbar">
+        <div>
+          <h1>Share</h1>
+          <p id="sessionLabel" class="muted">Checking session</p>
+        </div>
+        <nav class="auth-actions" aria-label="Account">
+          <a id="loginLink" class="button secondary" href="/auth/login">Sign in</a>
+          <a id="logoutLink" class="button secondary hidden" href="/auth/logout">Sign out</a>
+        </nav>
+      </header>
+
+      <main>
+        <section class="upload-panel" aria-labelledby="uploadHeading">
+          <div class="panel-head">
+            <h2 id="uploadHeading">File</h2>
+            <p id="statusText" class="status">Ready</p>
+          </div>
+
+          <form id="uploadForm">
+            <label class="dropzone" for="fileInput" id="dropzone">
+              <span class="dropzone-title" id="fileTitle">Choose one file</span>
+              <span class="dropzone-meta" id="fileMeta">No file selected</span>
+            </label>
+            <input id="fileInput" class="file-input" name="file" type="file">
+
+            <div class="actions">
+              <button class="button primary" id="uploadButton" type="submit" disabled>Upload</button>
+              <button class="button secondary" id="clearButton" type="button" disabled>Clear</button>
+            </div>
+          </form>
+        </section>
+
+        <section id="resultPanel" class="result-panel hidden" aria-labelledby="resultHeading">
+          <div class="panel-head">
+            <h2 id="resultHeading">URL</h2>
+          </div>
+          <output id="resultUrl" class="url-output"></output>
+          <div class="actions">
+            <button class="button primary" id="copyButton" type="button">Copy URL</button>
+            <button class="button secondary" id="shareButton" type="button">Share URL</button>
+          </div>
+        </section>
+      </main>
+    </div>
+  </body>
+</html>

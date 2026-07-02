@@ -13,15 +13,15 @@ import (
 )
 
 type fakeAuth struct {
-	principal Principal
-	err       error
+	authenticated AuthenticatedRequest
+	err           error
 }
 
-func (a fakeAuth) Authenticate(context.Context, string) (Principal, error) {
+func (a fakeAuth) Authenticate(*http.Request) (AuthenticatedRequest, error) {
 	if a.err != nil {
-		return Principal{}, a.err
+		return AuthenticatedRequest{}, a.err
 	}
-	return a.principal, nil
+	return a.authenticated, nil
 }
 
 type fakeStore struct {
@@ -50,9 +50,22 @@ func testConfig() Config {
 		PresignTTL:      15 * time.Minute,
 		UploadTokenTTL:  time.Hour,
 		UploadTokenKey:  []byte("01234567890123456789012345678901"),
+		SessionTTL:      12 * time.Hour,
+		SessionAuthKey:  []byte("abcdefghijklmnopqrstuvwxyz012345"),
 		Clock:           func() time.Time { return time.Date(2026, 6, 28, 12, 0, 0, 0, time.UTC) },
 		Entropy:         strings.NewReader("0123456789"),
 	}
+}
+
+func authenticatedFakeAuth(subject string) fakeAuth {
+	return fakeAuth{authenticated: AuthenticatedRequest{
+		Principal: Principal{Subject: subject},
+		CSRFToken: "csrf-token",
+	}}
+}
+
+func setCSRF(request *http.Request) {
+	request.Header.Set(csrfHeaderName, "csrf-token")
 }
 
 func TestHealthzIsUnauthenticated(t *testing.T) {
@@ -73,7 +86,7 @@ func TestHealthzIsUnauthenticated(t *testing.T) {
 func TestCreateUpload(t *testing.T) {
 	server := NewServer(
 		testConfig(),
-		fakeAuth{principal: Principal{Subject: "user-1"}},
+		authenticatedFakeAuth("user-1"),
 		fakeStore{presign: PresignedUpload{
 			URL:    "https://upload.example.test/presigned",
 			Header: http.Header{"Content-Type": []string{"image/png"}, "Host": []string{"ignored"}},
@@ -82,7 +95,7 @@ func TestCreateUpload(t *testing.T) {
 	)
 	body := `{"filename":"Screenshot 1.png","contentType":"image/png","size":42}`
 	request := httptest.NewRequest(http.MethodPost, "/api/uploads", strings.NewReader(body))
-	request.Header.Set("Authorization", "Bearer test")
+	setCSRF(request)
 	recorder := httptest.NewRecorder()
 
 	server.ServeHTTP(recorder, request)
@@ -126,10 +139,22 @@ func TestCreateUploadRejectsUnauthenticated(t *testing.T) {
 	}
 }
 
+func TestCreateUploadRejectsMissingCSRFToken(t *testing.T) {
+	server := NewServer(testConfig(), authenticatedFakeAuth("user-1"), fakeStore{}, slog.Default())
+	request := httptest.NewRequest(http.MethodPost, "/api/uploads", strings.NewReader(`{"filename":"a.txt","size":1}`))
+	recorder := httptest.NewRecorder()
+
+	server.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusForbidden)
+	}
+}
+
 func TestCreateUploadRejectsOversizedFile(t *testing.T) {
-	server := NewServer(testConfig(), fakeAuth{principal: Principal{Subject: "user-1"}}, fakeStore{}, slog.Default())
+	server := NewServer(testConfig(), authenticatedFakeAuth("user-1"), fakeStore{}, slog.Default())
 	request := httptest.NewRequest(http.MethodPost, "/api/uploads", strings.NewReader(`{"filename":"a.bin","size":2048}`))
-	request.Header.Set("Authorization", "Bearer test")
+	setCSRF(request)
 	recorder := httptest.NewRecorder()
 
 	server.ServeHTTP(recorder, request)
@@ -153,12 +178,12 @@ func TestCompleteUploadReturnsVerifiedMetadata(t *testing.T) {
 	}
 	server := NewServer(
 		cfg,
-		fakeAuth{principal: Principal{Subject: "user-1"}},
+		authenticatedFakeAuth("user-1"),
 		fakeStore{head: ObjectMetadata{ContentLength: 12, ETag: "abc123"}},
 		slog.Default(),
 	)
 	request := httptest.NewRequest(http.MethodPost, "/api/uploads/complete", strings.NewReader(`{"uploadToken":"`+token+`"}`))
-	request.Header.Set("Authorization", "Bearer test")
+	setCSRF(request)
 	recorder := httptest.NewRecorder()
 
 	server.ServeHTTP(recorder, request)
@@ -191,12 +216,12 @@ func TestCompleteUploadAllowsBestEffortHeadFailure(t *testing.T) {
 	}
 	server := NewServer(
 		cfg,
-		fakeAuth{principal: Principal{Subject: "user-1"}},
+		authenticatedFakeAuth("user-1"),
 		fakeStore{headErr: errors.New("transient")},
 		slog.Default(),
 	)
 	request := httptest.NewRequest(http.MethodPost, "/api/uploads/complete", strings.NewReader(`{"uploadToken":"`+token+`"}`))
-	request.Header.Set("Authorization", "Bearer test")
+	setCSRF(request)
 	recorder := httptest.NewRecorder()
 
 	server.ServeHTTP(recorder, request)
@@ -246,5 +271,81 @@ func TestPublicShareRejectsObjectsOutsideConfiguredPrefix(t *testing.T) {
 
 	if recorder.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusNotFound)
+	}
+}
+
+func TestSessionEndpointReturnsAuthenticatedUserAndCSRF(t *testing.T) {
+	server := NewServer(testConfig(), authenticatedFakeAuth("user-1"), fakeStore{}, slog.Default())
+	request := httptest.NewRequest(http.MethodGet, "/api/session", nil)
+	recorder := httptest.NewRecorder()
+
+	server.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	var response sessionResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if !response.Authenticated || response.User.Subject != "user-1" || response.CSRFToken != "csrf-token" {
+		t.Fatalf("response = %#v", response)
+	}
+}
+
+func TestSessionEndpointReturnsAnonymousSessionState(t *testing.T) {
+	server := NewServer(testConfig(), fakeAuth{err: ErrUnauthorized}, fakeStore{}, slog.Default())
+	request := httptest.NewRequest(http.MethodGet, "/api/session", nil)
+	recorder := httptest.NewRecorder()
+
+	server.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	var response sessionResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Authenticated {
+		t.Fatalf("response = %#v", response)
+	}
+}
+
+func TestWebRoutesServeAppAndManifest(t *testing.T) {
+	server := NewServer(testConfig(), fakeAuth{err: ErrUnauthorized}, fakeStore{}, slog.Default())
+
+	for _, path := range []string{"/", "/share"} {
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		recorder := httptest.NewRecorder()
+		server.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("%s status = %d, body = %s", path, recorder.Code, recorder.Body.String())
+		}
+		if !strings.Contains(recorder.Body.String(), `<link rel="manifest" href="/manifest.webmanifest">`) {
+			t.Fatalf("%s did not serve the app shell", path)
+		}
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/manifest.webmanifest", nil)
+	recorder := httptest.NewRecorder()
+	server.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("manifest status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), `"share_target"`) || !strings.Contains(recorder.Body.String(), `"/share-target"`) {
+		t.Fatalf("manifest missing share target: %s", recorder.Body.String())
+	}
+}
+
+func TestShareTargetPostIsNotServerSideUploadFallback(t *testing.T) {
+	server := NewServer(testConfig(), fakeAuth{err: ErrUnauthorized}, fakeStore{}, slog.Default())
+	request := httptest.NewRequest(http.MethodPost, "/share-target", strings.NewReader("not uploaded here"))
+	recorder := httptest.NewRecorder()
+
+	server.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusBadRequest)
 	}
 }

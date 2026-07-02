@@ -1,11 +1,23 @@
 # b2-share-broker
 
-Small authenticated broker for uploading personal share files directly to a
-public Backblaze B2 bucket.
+Installable web app for uploading personal share files directly to a public
+Backblaze B2 bucket.
 
-The broker never handles file bytes. Clients authenticate to the broker, ask for
-a presigned S3-compatible PUT URL, upload directly to B2, then receive the
-public share URL to copy or share.
+The broker never handles file bytes. The browser authenticates with Keycloak,
+asks the broker for a presigned S3-compatible PUT URL, uploads one file directly
+to B2, then receives a public unlisted URL to copy or share.
+
+## Web App
+
+- `GET /` serves the fallback browser upload UI.
+- `GET /share` serves the same UI and receives pending PWA share-target files.
+- `GET /manifest.webmanifest` exposes the installable PWA manifest.
+- `GET /sw.js` serves the service worker that handles Web Share Target POSTs.
+- `POST /share-target` is reserved for the installed PWA share target and is
+  not a server-side file upload fallback.
+
+V1 accepts one file at a time. Public links are unlisted and readable by anyone
+with the URL.
 
 ## API
 
@@ -20,9 +32,15 @@ under the configured `OBJECT_PREFIX` and redirects to the native public B2 URL.
 
 The cluster does not proxy downloaded file bytes.
 
+### `GET /api/session`
+
+Returns the current browser session state. Authenticated responses include a
+CSRF token that must be sent in `X-CSRF-Token` on unsafe API requests.
+
 ### `POST /api/uploads`
 
-Requires `Authorization: Bearer <oidc-access-token>`.
+Requires the authenticated browser session cookie and a matching
+`X-CSRF-Token` header.
 
 Request:
 
@@ -48,12 +66,12 @@ Response:
 }
 ```
 
-The client must upload the file bytes to `uploadUrl` with every returned
+The browser must upload the file bytes to `uploadUrl` with every returned
 `requiredHeaders` value.
 
 ### `POST /api/uploads/complete`
 
-Requires the same authenticated principal that created the upload target.
+Requires the same authenticated browser session that created the upload target.
 
 Request:
 
@@ -84,8 +102,8 @@ Required environment variables:
 
 - `OIDC_ISSUER_URL`: Keycloak issuer, for bees
   `https://auth.doesthings.io/realms/doesthings.io`
-- `OIDC_AUDIENCE`: expected token audience/client ID, normally
-  `b2-share-broker`
+- `OIDC_CLIENT_ID`: Keycloak web client ID, for bees `b2-share-web`
+- `OIDC_CLIENT_SECRET`: Keycloak confidential client secret
 - `OIDC_ALLOWED_SUBJECTS`: comma-separated allowed Keycloak subject IDs
 - `B2_ENDPOINT`: S3-compatible endpoint, for bees
   `https://s3.us-west-004.backblazeb2.com`
@@ -99,6 +117,7 @@ Required environment variables:
 - `AWS_ACCESS_KEY_ID` or `ACCESS_KEY_ID`: B2 application key ID
 - `AWS_SECRET_ACCESS_KEY` or `ACCESS_SECRET_KEY`: B2 application key
 - `UPLOAD_TOKEN_KEY`: at least 32 bytes, or base64 encoding of at least 32 bytes
+- `SESSION_AUTH_KEY`: at least 32 bytes, or base64 encoding of at least 32 bytes
 
 Optional environment variables:
 
@@ -106,53 +125,34 @@ Optional environment variables:
 - `MAX_UPLOAD_BYTES`: defaults to `536870912`
 - `PRESIGN_TTL_SECONDS`: defaults to `900`
 - `UPLOAD_TOKEN_TTL_SECONDS`: defaults to `3600`
+- `SESSION_TTL_SECONDS`: defaults to `43200`
 - `PORT` or `LISTEN_ADDR`: defaults to `:8080`
-
-## CLI
-
-Install/build:
-
-```bash
-go install github.com/unixfg/b2-share-broker/cmd/b2-share@latest
-```
-
-Upload:
-
-```bash
-b2-share upload ./file.png
-```
-
-The CLI discovers the OIDC issuer, starts a local callback listener, performs a
-PKCE browser login, stores tokens in the OS keychain when available, falls back
-to a `0600` file in the user config directory, uploads directly to B2, prints
-the public URL, and copies it to the clipboard when possible.
-
-Environment overrides:
-
-- `B2_SHARE_BROKER_URL`
-- `B2_SHARE_OIDC_ISSUER`
-- `B2_SHARE_OIDC_CLIENT_ID`
 
 ## Keycloak Setup
 
-Create a public client named `b2-share-broker` in the
-`doesthings.io` realm.
+Create a confidential client named `b2-share-web` in the `doesthings.io` realm.
 
 Minimum client settings:
 
 - Standard flow enabled
-- PKCE required with S256
-- Client authentication disabled
-- Valid redirect URIs include `http://127.0.0.1:*/*`
-- Token audience includes `b2-share-broker`
-- Offline access allowed if refresh tokens are desired
+- Client authentication enabled
+- Valid redirect URIs include
+  `https://share.doesthings.online/auth/callback`
+- Web origins include `https://share.doesthings.online`
+- No localhost redirect URI
 
 After the first login, inspect the token subject and set
 `OIDC_ALLOWED_SUBJECTS` in the GitOps ConfigMap.
 
-This client is for the native CLI flow. If a hosted browser UI is added later,
-create a separate public web client with a redirect URI on
-`https://share.doesthings.online/auth/callback`.
+## B2 CORS
+
+The bucket must allow browser PUT uploads from
+`https://share.doesthings.online`, including:
+
+- Allowed origin: `https://share.doesthings.online`
+- Allowed operations/methods: `s3_put`, `s3_head`, `s3_get`
+- Allowed headers: `authorization`, `content-type`, `x-amz-*`
+- Expose headers: `etag`
 
 ## GitOps Deployment
 
@@ -160,18 +160,18 @@ The bees deployment lives in `github.com/unixfg/gitops` under
 `apps/b2-share-broker`.
 
 Before merging the GitOps PR, replace the placeholder SOPS secret values with a
-least-privilege B2 application key for the selected public bucket and set the
-real `OIDC_ALLOWED_SUBJECTS`.
+least-privilege B2 application key for the selected public bucket, set
+`OIDC_CLIENT_SECRET`, set `SESSION_AUTH_KEY`, and set the real
+`OIDC_ALLOWED_SUBJECTS`.
 
 ## Development
 
 ```bash
 go test ./...
 go build ./cmd/b2-share-broker
-go build ./cmd/b2-share
 ```
 
 ## Follow-up
 
-Add a separate PeerTube-oriented upload profile later. Do not reuse the generic
-share bucket/prefix for PeerTube publishing without an explicit policy decision.
+Native iOS/macOS share extensions are deferred. Apple users can use the browser
+UI in v1.

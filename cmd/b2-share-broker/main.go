@@ -23,7 +23,9 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	auth, err := broker.NewOIDCAuthenticator(ctx, cfg.IssuerURL, cfg.Audience, cfg.AllowedSubjects)
+	sessions := broker.NewSessionManager(cfg)
+	auth := broker.NewSessionAuthenticator(sessions)
+	login, err := broker.NewOIDCLogin(ctx, cfg, sessions)
 	if err != nil {
 		logger.Error("oidc setup failed", "error", err)
 		os.Exit(1)
@@ -35,7 +37,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	handler := broker.NewServer(cfg, auth, store, logger)
+	handler := broker.NewServerWithLogin(cfg, auth, login, store, logger)
 	server := &http.Server{
 		Addr:              cfg.ListenAddr,
 		Handler:           handler,
