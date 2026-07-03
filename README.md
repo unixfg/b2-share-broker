@@ -4,8 +4,9 @@ Installable web app for uploading personal share files directly to a public
 Backblaze B2 bucket.
 
 The broker never handles file bytes. The browser authenticates with Keycloak,
-asks the broker for a presigned S3-compatible PUT URL, uploads one file directly
-to B2, then receives a public unlisted URL to copy or share.
+hashes the selected file with SHA-256, asks the broker for a presigned
+S3-compatible PUT URL when the content is new, uploads one file directly to B2,
+then receives a public unlisted URL to copy or share.
 
 ## Web App
 
@@ -25,10 +26,10 @@ with the URL.
 
 Unauthenticated health check.
 
-### `GET /s/{objectKey}`
+### `GET /s/{slug}`
 
-Unauthenticated public share link. The broker validates that `objectKey` is
-under the configured `OBJECT_PREFIX` and redirects to the native public B2 URL.
+Unauthenticated public share link. The broker looks up `slug` in Postgres and
+redirects public aliases to the stored native public B2 URL.
 
 The cluster does not proxy downloaded file bytes.
 
@@ -48,11 +49,13 @@ Request:
 {
   "filename": "Screenshot 1.png",
   "contentType": "image/png",
-  "size": 12345
+  "size": 12345,
+  "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "alias": "optional-custom-name"
 }
 ```
 
-Response:
+New-content response:
 
 ```json
 {
@@ -60,14 +63,20 @@ Response:
   "requiredHeaders": {
     "Content-Type": "image/png"
   },
-  "objectKey": "share-broker/2026/06/28/01J.../Screenshot_1.png",
+  "objectKey": "s/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.png",
   "uploadToken": "...",
-  "publicUrl": "https://share.doesthings.online/s/share-broker/..."
+  "publicUrl": "https://share.doesthings.online/s/hmacalias.png",
+  "b2Url": "https://<bucket>.s3.us-west-004.backblazeb2.com/s/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.png",
+  "alreadyUploaded": false
 }
 ```
 
 The browser must upload the file bytes to `uploadUrl` with every returned
 `requiredHeaders` value.
+
+If the SHA-256 already exists in metadata, the response has
+`alreadyUploaded: true`, omits `uploadUrl` and `uploadToken`, and records only
+the new alias.
 
 ### `POST /api/uploads/complete`
 
@@ -85,16 +94,24 @@ Response:
 
 ```json
 {
-  "objectKey": "share-broker/2026/06/28/01J.../Screenshot_1.png",
-  "publicUrl": "https://share.doesthings.online/s/share-broker/...",
+  "objectKey": "s/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.png",
+  "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "publicUrl": "https://share.doesthings.online/s/hmacalias.png",
+  "b2Url": "https://<bucket>.s3.us-west-004.backblazeb2.com/s/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.png",
   "verified": true,
   "size": 12345,
   "etag": "..."
 }
 ```
 
-If the B2 `HEAD` check is temporarily unavailable, the broker still returns the
-URL with `verified: false`.
+The broker records object and alias metadata only after the B2 `HEAD` check
+verifies the object.
+
+### `GET /api/shares`
+
+Requires an authenticated browser session. Returns recent aliases owned by the
+current subject with filenames, sizes, content types, redirect counts, share
+URLs, and native B2 URLs.
 
 ## Broker Configuration
 
@@ -116,12 +133,14 @@ Required environment variables:
   `https://share.doesthings.online`; defaults to `B2_PUBLIC_BASE_URL`
 - `AWS_ACCESS_KEY_ID` or `ACCESS_KEY_ID`: B2 application key ID
 - `AWS_SECRET_ACCESS_KEY` or `ACCESS_SECRET_KEY`: B2 application key
+- `DATABASE_URL`: Postgres URL for share metadata
 - `UPLOAD_TOKEN_KEY`: at least 32 bytes, or base64 encoding of at least 32 bytes
+- `ALIAS_HMAC_KEY`: at least 32 bytes, or base64 encoding of at least 32 bytes
 - `SESSION_AUTH_KEY`: at least 32 bytes, or base64 encoding of at least 32 bytes
 
 Optional environment variables:
 
-- `OBJECT_PREFIX`: defaults to `share-broker`
+- `OBJECT_PREFIX`: defaults to `s`
 - `MAX_UPLOAD_BYTES`: defaults to `536870912`
 - `PRESIGN_TTL_SECONDS`: defaults to `900`
 - `UPLOAD_TOKEN_TTL_SECONDS`: defaults to `3600`
@@ -130,7 +149,8 @@ Optional environment variables:
 
 ## Keycloak Setup
 
-Create a confidential client named `b2-share-web` in the `doesthings.io` realm.
+Create a confidential client named `b2-share-web` in the `doesthings.online`
+realm.
 
 Minimum client settings:
 

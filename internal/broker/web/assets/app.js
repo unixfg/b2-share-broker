@@ -6,7 +6,8 @@ const PENDING_KEY = "current";
 const state = {
   session: { authenticated: false },
   file: null,
-  publicUrl: ""
+  publicUrl: "",
+  shares: []
 };
 
 const els = {};
@@ -19,6 +20,7 @@ async function init() {
   await registerServiceWorker();
   await loadPendingShare();
   await refreshSession();
+  await loadShares();
   render();
 }
 
@@ -29,6 +31,7 @@ function bindElements() {
     "logoutLink",
     "uploadForm",
     "fileInput",
+    "aliasInput",
     "dropzone",
     "fileTitle",
     "fileMeta",
@@ -38,7 +41,9 @@ function bindElements() {
     "resultPanel",
     "resultUrl",
     "copyButton",
-    "shareButton"
+    "shareButton",
+    "historyPanel",
+    "historyList"
   ]) {
     els[id] = document.getElementById(id);
   }
@@ -64,6 +69,7 @@ function bindEvents() {
     await clearPending();
     setFile(null);
     state.publicUrl = "";
+    els.aliasInput.value = "";
     setStatus("Ready");
     render();
   });
@@ -112,6 +118,19 @@ async function refreshSession() {
   state.session = await response.json();
 }
 
+async function loadShares() {
+  if (!state.session.authenticated) {
+    state.shares = [];
+    return;
+  }
+  try {
+    const response = await apiFetch("/api/shares", { method: "GET" });
+    state.shares = response.shares || [];
+  } catch (error) {
+    state.shares = [];
+  }
+}
+
 async function loadPendingShare() {
   const pending = await getPending();
   if (!pending) {
@@ -142,6 +161,7 @@ function render() {
   els.uploadButton.disabled = !state.file;
   els.clearButton.disabled = !state.file && !state.publicUrl;
   els.resultPanel.classList.toggle("hidden", !state.publicUrl);
+  els.historyPanel.classList.toggle("hidden", !state.session.authenticated || state.shares.length === 0);
   els.resultUrl.textContent = state.publicUrl;
   if (state.file) {
     els.fileTitle.textContent = state.file.name || "upload";
@@ -150,6 +170,7 @@ function render() {
     els.fileTitle.textContent = "Choose one file";
     els.fileMeta.textContent = "No file selected";
   }
+  renderShares();
 }
 
 function setStatus(message, isError = false) {
@@ -175,16 +196,28 @@ async function uploadSelectedFile() {
     return;
   }
   try {
-    setStatus("Creating upload");
+    setStatus("Hashing");
     els.uploadButton.disabled = true;
+    const sha256 = await sha256File(file);
+    setStatus("Creating upload");
+    const alias = els.aliasInput.value.trim();
     const createResponse = await apiFetch("/api/uploads", {
       method: "POST",
       body: JSON.stringify({
         filename: file.name || "upload",
         contentType: file.type || "application/octet-stream",
-        size: file.size
+        size: file.size,
+        sha256,
+        ...(alias ? { alias } : {})
       })
     });
+    if (createResponse.alreadyUploaded) {
+      state.publicUrl = createResponse.publicUrl;
+      await clearPending();
+      await loadShares();
+      setStatus("Uploaded");
+      return;
+    }
     setStatus("Uploading");
     const uploadHeaders = new Headers(createResponse.requiredHeaders || {});
     if (!uploadHeaders.has("Content-Type")) {
@@ -206,6 +239,7 @@ async function uploadSelectedFile() {
     });
     state.publicUrl = completeResponse.publicUrl;
     await clearPending();
+    await loadShares();
     setStatus(completeResponse.verified ? "Uploaded" : "Uploaded, verification pending");
   } catch (error) {
     setStatus(error.message || "Upload failed.", true);
@@ -214,7 +248,7 @@ async function uploadSelectedFile() {
   }
 }
 
-async function apiFetch(url, options) {
+async function apiFetch(url, options = {}) {
   const response = await fetch(url, {
     credentials: "same-origin",
     ...options,
@@ -234,6 +268,62 @@ async function apiFetch(url, options) {
     throw new Error(body.error || `Request failed with ${response.status}`);
   }
   return body;
+}
+
+async function sha256File(file) {
+  if (!crypto.subtle) {
+    throw new Error("SHA-256 is not available in this browser.");
+  }
+  const buffer = await file.arrayBuffer();
+  const digest = await crypto.subtle.digest("SHA-256", buffer);
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function renderShares() {
+  if (!els.historyList) {
+    return;
+  }
+  els.historyList.textContent = "";
+  for (const share of state.shares) {
+    const item = document.createElement("article");
+    item.className = "history-item";
+
+    const title = document.createElement("div");
+    title.className = "history-title";
+    title.textContent = share.displayFilename || share.slug || "share";
+
+    const meta = document.createElement("div");
+    meta.className = "history-meta";
+    meta.append(
+      historySpan(formatBytes(share.size)),
+      historySpan(share.contentType || "application/octet-stream"),
+      historySpan(`${share.redirectCount || 0} opens`),
+      historySpan(formatDate(share.updatedAt))
+    );
+
+    const links = document.createElement("div");
+    links.className = "history-links";
+    links.append(historyLink("Share", share.publicUrl), historyLink("B2", share.b2Url));
+
+    item.append(title, meta, links);
+    els.historyList.append(item);
+  }
+}
+
+function historySpan(value) {
+  const span = document.createElement("span");
+  span.textContent = value;
+  return span;
+}
+
+function historyLink(label, href) {
+  const link = document.createElement("a");
+  link.textContent = label;
+  link.href = href || "#";
+  if (!href) {
+    link.hidden = true;
+  }
+  return link;
 }
 
 async function copyResult() {
@@ -264,6 +354,17 @@ function formatBytes(bytes) {
     unit += 1;
   }
   return `${value.toFixed(value >= 10 || unit === 0 ? 0 : 1)} ${units[unit]}`;
+}
+
+function formatDate(value) {
+  if (!value) {
+    return "";
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+  return date.toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
 }
 
 function openDB() {

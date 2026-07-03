@@ -1,11 +1,9 @@
 package broker
 
 import (
-	"crypto/rand"
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"io"
 	"net/url"
 	"os"
 	"strconv"
@@ -17,7 +15,7 @@ const (
 	defaultListenAddr      = ":8080"
 	defaultRegion          = "us-west-004"
 	defaultMaxUploadBytes  = int64(512 * 1024 * 1024)
-	defaultObjectPrefix    = "share-broker"
+	defaultObjectPrefix    = "s"
 	defaultPresignTTL      = 15 * time.Minute
 	defaultUploadTokenTTL  = time.Hour
 	defaultSessionTTL      = 12 * time.Hour
@@ -37,15 +35,16 @@ type Config struct {
 	PublicBaseURL     string
 	B2AccessKeyID     string
 	B2SecretAccessKey string
+	DatabaseURL       string
 	ObjectPrefix      string
 	MaxUploadBytes    int64
 	PresignTTL        time.Duration
 	UploadTokenTTL    time.Duration
 	UploadTokenKey    []byte
+	AliasHMACKey      []byte
 	SessionTTL        time.Duration
 	SessionAuthKey    []byte
 	Clock             func() time.Time
-	Entropy           io.Reader
 }
 
 func LoadConfigFromEnv() (Config, error) {
@@ -66,6 +65,10 @@ func LoadConfigFromEnv() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	aliasHMACKey, err := parseSecretKey(os.Getenv("ALIAS_HMAC_KEY"))
+	if err != nil {
+		return Config{}, err
+	}
 
 	b2PublicBaseURL := strings.TrimRight(envString("B2_PUBLIC_BASE_URL", ""), "/")
 	cfg := Config{
@@ -81,15 +84,16 @@ func LoadConfigFromEnv() (Config, error) {
 		PublicBaseURL:     strings.TrimRight(envString("PUBLIC_BASE_URL", b2PublicBaseURL), "/"),
 		B2AccessKeyID:     firstEnv("AWS_ACCESS_KEY_ID", "ACCESS_KEY_ID"),
 		B2SecretAccessKey: firstEnv("AWS_SECRET_ACCESS_KEY", "ACCESS_SECRET_KEY"),
+		DatabaseURL:       envString("DATABASE_URL", ""),
 		ObjectPrefix:      strings.Trim(envString("OBJECT_PREFIX", defaultObjectPrefix), "/"),
 		MaxUploadBytes:    envInt64("MAX_UPLOAD_BYTES", defaultMaxUploadBytes),
 		PresignTTL:        envDurationSeconds("PRESIGN_TTL_SECONDS", defaultPresignTTL),
 		UploadTokenTTL:    envDurationSeconds("UPLOAD_TOKEN_TTL_SECONDS", defaultUploadTokenTTL),
 		UploadTokenKey:    tokenKey,
+		AliasHMACKey:      aliasHMACKey,
 		SessionTTL:        envDurationSeconds("SESSION_TTL_SECONDS", defaultSessionTTL),
 		SessionAuthKey:    sessionAuthKey,
 		Clock:             time.Now,
-		Entropy:           rand.Reader,
 	}
 
 	return cfg, cfg.Validate()
@@ -112,8 +116,12 @@ func (c Config) Validate() error {
 	require("PUBLIC_BASE_URL", c.PublicBaseURL)
 	require("AWS_ACCESS_KEY_ID or ACCESS_KEY_ID", c.B2AccessKeyID)
 	require("AWS_SECRET_ACCESS_KEY or ACCESS_SECRET_KEY", c.B2SecretAccessKey)
+	require("DATABASE_URL", c.DatabaseURL)
 	if len(c.UploadTokenKey) < minUploadTokenKeyBytes {
 		missing = append(missing, "UPLOAD_TOKEN_KEY")
+	}
+	if len(c.AliasHMACKey) < minUploadTokenKeyBytes {
+		missing = append(missing, "ALIAS_HMAC_KEY")
 	}
 	if len(c.SessionAuthKey) < minUploadTokenKeyBytes {
 		missing = append(missing, "SESSION_AUTH_KEY")
@@ -136,6 +144,12 @@ func (c Config) Validate() error {
 	}
 	if _, err := url.ParseRequestURI(c.PublicBaseURL); err != nil {
 		return fmt.Errorf("PUBLIC_BASE_URL is invalid: %w", err)
+	}
+	if parsed, err := url.Parse(c.DatabaseURL); err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		if err != nil {
+			return fmt.Errorf("DATABASE_URL is invalid: %w", err)
+		}
+		return errors.New("DATABASE_URL is invalid")
 	}
 	if c.MaxUploadBytes <= 0 {
 		return errors.New("MAX_UPLOAD_BYTES must be positive")

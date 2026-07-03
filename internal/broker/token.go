@@ -12,11 +12,15 @@ import (
 )
 
 type uploadTokenPayload struct {
-	ObjectKey   string `json:"objectKey"`
-	ContentType string `json:"contentType"`
-	Size        int64  `json:"size"`
-	Subject     string `json:"sub"`
-	ExpiresAt   int64  `json:"exp"`
+	ObjectKey       string `json:"objectKey"`
+	SHA256          string `json:"sha256"`
+	AliasSlug       string `json:"aliasSlug"`
+	DisplayFilename string `json:"displayFilename"`
+	ContentType     string `json:"contentType"`
+	Extension       string `json:"extension"`
+	Size            int64  `json:"size"`
+	Subject         string `json:"sub"`
+	ExpiresAt       int64  `json:"exp"`
 }
 
 func SignUploadToken(key []byte, payload uploadTokenPayload) (string, error) {
@@ -53,7 +57,7 @@ func VerifyUploadToken(key []byte, token string, now time.Time) (uploadTokenPayl
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return uploadTokenPayload{}, errors.New("invalid upload token payload")
 	}
-	if payload.ObjectKey == "" || payload.Subject == "" || payload.Size <= 0 {
+	if payload.ObjectKey == "" || payload.SHA256 == "" || payload.AliasSlug == "" || payload.Subject == "" || payload.Size <= 0 {
 		return uploadTokenPayload{}, errors.New("invalid upload token payload")
 	}
 	if now.Unix() > payload.ExpiresAt {

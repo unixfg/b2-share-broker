@@ -36,8 +36,14 @@ func main() {
 		logger.Error("b2 setup failed", "error", err)
 		os.Exit(1)
 	}
+	metadata, err := broker.NewPostgresMetadataStore(ctx, cfg.DatabaseURL)
+	if err != nil {
+		logger.Error("metadata setup failed", "error", err)
+		os.Exit(1)
+	}
+	defer metadata.Close()
 
-	handler := broker.NewServerWithLogin(cfg, auth, login, store, logger)
+	handler := broker.NewServerWithLogin(cfg, auth, login, store, metadata, logger)
 	server := &http.Server{
 		Addr:              cfg.ListenAddr,
 		Handler:           handler,

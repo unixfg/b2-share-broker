@@ -80,14 +80,16 @@ h2 {
 }
 
 .upload-panel,
-.result-panel {
+.result-panel,
+.history-panel {
   padding: 18px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--surface);
 }
 
-.result-panel {
+.result-panel,
+.history-panel {
   margin-top: 16px;
 }
 
@@ -137,6 +139,29 @@ h2 {
   white-space: nowrap;
 }
 
+.field {
+  display: grid;
+  gap: 6px;
+  margin-top: 14px;
+  font-size: 0.92rem;
+  font-weight: 680;
+}
+
+.field input {
+  min-height: 42px;
+  width: 100%;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+  color: var(--ink);
+}
+
+.field input:focus {
+  outline: 3px solid color-mix(in srgb, var(--focus) 24%, transparent);
+  border-color: var(--focus);
+}
+
 .button {
   display: inline-flex;
   align-items: center;
@@ -180,6 +205,39 @@ h2 {
   border-radius: 8px;
   overflow-wrap: anywhere;
   background: #fbfaf7;
+}
+
+.history-list {
+  display: grid;
+  gap: 10px;
+}
+
+.history-item {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfaf7;
+}
+
+.history-title {
+  overflow-wrap: anywhere;
+  font-weight: 720;
+}
+
+.history-meta,
+.history-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.history-links a {
+  color: var(--accent);
+  font-weight: 680;
 }
 
 .hidden {

@@ -36,6 +36,10 @@
               <span class="dropzone-meta" id="fileMeta">No file selected</span>
             </label>
             <input id="fileInput" class="file-input" name="file" type="file">
+            <label class="field">
+              <span>Alias</span>
+              <input id="aliasInput" name="alias" type="text" autocomplete="off" placeholder="Optional custom link">
+            </label>
 
             <div class="actions">
               <button class="button primary" id="uploadButton" type="submit" disabled>Upload</button>
@@ -53,6 +57,13 @@
             <button class="button primary" id="copyButton" type="button">Copy URL</button>
             <button class="button secondary" id="shareButton" type="button">Share URL</button>
           </div>
+        </section>
+
+        <section id="historyPanel" class="history-panel hidden" aria-labelledby="historyHeading">
+          <div class="panel-head">
+            <h2 id="historyHeading">History</h2>
+          </div>
+          <div class="history-list" id="historyList"></div>
         </section>
       </main>
     </div>

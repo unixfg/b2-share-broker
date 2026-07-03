@@ -9,10 +9,15 @@ func TestUploadTokenRoundTrip(t *testing.T) {
 	key := []byte("01234567890123456789012345678901")
 	now := time.Date(2026, 6, 28, 0, 0, 0, 0, time.UTC)
 	token, err := SignUploadToken(key, uploadTokenPayload{
-		ObjectKey: "share-broker/key.txt",
-		Size:      1,
-		Subject:   "user-1",
-		ExpiresAt: now.Add(time.Hour).Unix(),
+		ObjectKey:       "s/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.txt",
+		SHA256:          "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		AliasSlug:       "alias.txt",
+		DisplayFilename: "file.txt",
+		ContentType:     "text/plain",
+		Extension:       ".txt",
+		Size:            1,
+		Subject:         "user-1",
+		ExpiresAt:       now.Add(time.Hour).Unix(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -21,7 +26,7 @@ func TestUploadTokenRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if payload.ObjectKey != "share-broker/key.txt" || payload.Subject != "user-1" {
+	if payload.ObjectKey == "" || payload.SHA256 == "" || payload.AliasSlug != "alias.txt" || payload.Subject != "user-1" {
 		t.Fatalf("payload = %#v", payload)
 	}
 }
@@ -29,7 +34,9 @@ func TestUploadTokenRoundTrip(t *testing.T) {
 func TestUploadTokenRejectsTampering(t *testing.T) {
 	key := []byte("01234567890123456789012345678901")
 	token, err := SignUploadToken(key, uploadTokenPayload{
-		ObjectKey: "share-broker/key.txt",
+		ObjectKey: "s/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.txt",
+		SHA256:    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		AliasSlug: "alias.txt",
 		Size:      1,
 		Subject:   "user-1",
 		ExpiresAt: time.Now().Add(time.Hour).Unix(),

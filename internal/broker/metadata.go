@@ -1,0 +1,316 @@
+package broker
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"time"
+
+	_ "github.com/jackc/pgx/v5/stdlib"
+)
+
+type StoredObject struct {
+	SHA256        string    `json:"sha256"`
+	ObjectKey     string    `json:"objectKey"`
+	Size          int64     `json:"size"`
+	ContentType   string    `json:"contentType"`
+	Extension     string    `json:"extension"`
+	FirstFilename string    `json:"firstFilename"`
+	Uploader      string    `json:"uploader"`
+	CreatedAt     time.Time `json:"createdAt"`
+}
+
+type ShareAlias struct {
+	Slug             string    `json:"slug"`
+	ObjectSHA256     string    `json:"sha256"`
+	ObjectKey        string    `json:"objectKey"`
+	Owner            string    `json:"owner"`
+	DisplayFilename  string    `json:"displayFilename"`
+	Visibility       string    `json:"visibility"`
+	CreatedAt        time.Time `json:"createdAt"`
+	UpdatedAt        time.Time `json:"updatedAt"`
+	RedirectCount    int64     `json:"redirectCount"`
+	LastRedirectedAt time.Time `json:"lastRedirectedAt,omitempty"`
+	Size             int64     `json:"size"`
+	ContentType      string    `json:"contentType"`
+	B2URL            string    `json:"b2Url"`
+	PublicURL        string    `json:"publicUrl"`
+}
+
+type MetadataStore interface {
+	GetObject(ctx context.Context, sha256 string) (StoredObject, bool, error)
+	UpsertObjectAndAlias(ctx context.Context, object StoredObject, alias ShareAlias) error
+	UpsertAlias(ctx context.Context, alias ShareAlias) error
+	GetAlias(ctx context.Context, slug string) (ShareAlias, bool, error)
+	RecordAliasRedirect(ctx context.Context, slug string) error
+	ListAliases(ctx context.Context, owner string, limit int) ([]ShareAlias, error)
+}
+
+type PostgresMetadataStore struct {
+	db *sql.DB
+}
+
+func NewPostgresMetadataStore(ctx context.Context, databaseURL string) (*PostgresMetadataStore, error) {
+	db, err := sql.Open("pgx", databaseURL)
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(5)
+	db.SetMaxIdleConns(5)
+	db.SetConnMaxLifetime(30 * time.Minute)
+	if err := db.PingContext(ctx); err != nil {
+		db.Close()
+		return nil, err
+	}
+	store := &PostgresMetadataStore{db: db}
+	if err := store.runMigrations(ctx); err != nil {
+		db.Close()
+		return nil, err
+	}
+	return store, nil
+}
+
+func (s *PostgresMetadataStore) Close() error {
+	return s.db.Close()
+}
+
+func (s *PostgresMetadataStore) runMigrations(ctx context.Context) error {
+	const advisoryKey = int64(255364328384130850)
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, `SELECT pg_advisory_lock($1)`, advisoryKey); err != nil {
+		return err
+	}
+	defer conn.ExecContext(context.Background(), `SELECT pg_advisory_unlock($1)`, advisoryKey)
+
+	for _, statement := range []string{
+		`CREATE TABLE IF NOT EXISTS objects (
+			sha256 text PRIMARY KEY CHECK (sha256 ~ '^[0-9a-f]{64}$'),
+			object_key text NOT NULL UNIQUE,
+			size_bytes bigint NOT NULL CHECK (size_bytes > 0),
+			content_type text NOT NULL,
+			extension text NOT NULL,
+			first_filename text NOT NULL,
+			uploader_subject text NOT NULL,
+			created_at timestamptz NOT NULL DEFAULT now()
+		)`,
+		`CREATE TABLE IF NOT EXISTS aliases (
+			slug text PRIMARY KEY,
+			object_sha256 text NOT NULL REFERENCES objects(sha256),
+			owner_subject text NOT NULL,
+			display_filename text NOT NULL,
+			visibility text NOT NULL DEFAULT 'public',
+			created_at timestamptz NOT NULL DEFAULT now(),
+			updated_at timestamptz NOT NULL DEFAULT now(),
+			redirect_count bigint NOT NULL DEFAULT 0,
+			last_redirected_at timestamptz
+		)`,
+		`CREATE INDEX IF NOT EXISTS aliases_owner_updated_idx ON aliases(owner_subject, updated_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS alias_history (
+			id bigserial PRIMARY KEY,
+			slug text NOT NULL,
+			previous_object_sha256 text NOT NULL,
+			new_object_sha256 text NOT NULL,
+			changed_by_subject text NOT NULL,
+			changed_at timestamptz NOT NULL DEFAULT now()
+		)`,
+		`CREATE INDEX IF NOT EXISTS alias_history_slug_idx ON alias_history(slug, changed_at DESC)`,
+	} {
+		if _, err := conn.ExecContext(ctx, statement); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *PostgresMetadataStore) GetObject(ctx context.Context, sha256 string) (StoredObject, bool, error) {
+	var object StoredObject
+	err := s.db.QueryRowContext(ctx, `SELECT sha256, object_key, size_bytes, content_type, extension, first_filename, uploader_subject, created_at FROM objects WHERE sha256 = $1`, sha256).Scan(
+		&object.SHA256,
+		&object.ObjectKey,
+		&object.Size,
+		&object.ContentType,
+		&object.Extension,
+		&object.FirstFilename,
+		&object.Uploader,
+		&object.CreatedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return StoredObject{}, false, nil
+	}
+	if err != nil {
+		return StoredObject{}, false, err
+	}
+	return object, true, nil
+}
+
+func (s *PostgresMetadataStore) UpsertObjectAndAlias(ctx context.Context, object StoredObject, alias ShareAlias) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `INSERT INTO objects (sha256, object_key, size_bytes, content_type, extension, first_filename, uploader_subject)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		ON CONFLICT (sha256) DO UPDATE SET
+			object_key = EXCLUDED.object_key,
+			size_bytes = EXCLUDED.size_bytes,
+			content_type = EXCLUDED.content_type,
+			extension = EXCLUDED.extension,
+			first_filename = EXCLUDED.first_filename`,
+		object.SHA256,
+		object.ObjectKey,
+		object.Size,
+		object.ContentType,
+		object.Extension,
+		object.FirstFilename,
+		object.Uploader,
+	); err != nil {
+		return err
+	}
+	if err := upsertAliasTx(ctx, tx, alias); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *PostgresMetadataStore) UpsertAlias(ctx context.Context, alias ShareAlias) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := upsertAliasTx(ctx, tx, alias); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func upsertAliasTx(ctx context.Context, tx *sql.Tx, alias ShareAlias) error {
+	var previous string
+	err := tx.QueryRowContext(ctx, `SELECT object_sha256 FROM aliases WHERE slug = $1 FOR UPDATE`, alias.Slug).Scan(&previous)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if previous != "" && previous != alias.ObjectSHA256 {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO alias_history (slug, previous_object_sha256, new_object_sha256, changed_by_subject) VALUES ($1, $2, $3, $4)`,
+			alias.Slug,
+			previous,
+			alias.ObjectSHA256,
+			alias.Owner,
+		); err != nil {
+			return err
+		}
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO aliases (slug, object_sha256, owner_subject, display_filename, visibility)
+		VALUES ($1, $2, $3, $4, $5)
+		ON CONFLICT (slug) DO UPDATE SET
+			object_sha256 = EXCLUDED.object_sha256,
+			owner_subject = EXCLUDED.owner_subject,
+			display_filename = EXCLUDED.display_filename,
+			visibility = EXCLUDED.visibility,
+			updated_at = now()`,
+		alias.Slug,
+		alias.ObjectSHA256,
+		alias.Owner,
+		alias.DisplayFilename,
+		alias.Visibility,
+	)
+	return err
+}
+
+func (s *PostgresMetadataStore) GetAlias(ctx context.Context, slug string) (ShareAlias, bool, error) {
+	var alias ShareAlias
+	var last sql.NullTime
+	err := s.db.QueryRowContext(ctx, `SELECT
+			a.slug, a.object_sha256, o.object_key, a.owner_subject, a.display_filename, a.visibility,
+			a.created_at, a.updated_at, a.redirect_count, a.last_redirected_at,
+			o.size_bytes, o.content_type
+		FROM aliases a
+		JOIN objects o ON o.sha256 = a.object_sha256
+		WHERE a.slug = $1`, slug).Scan(
+		&alias.Slug,
+		&alias.ObjectSHA256,
+		&alias.ObjectKey,
+		&alias.Owner,
+		&alias.DisplayFilename,
+		&alias.Visibility,
+		&alias.CreatedAt,
+		&alias.UpdatedAt,
+		&alias.RedirectCount,
+		&last,
+		&alias.Size,
+		&alias.ContentType,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ShareAlias{}, false, nil
+	}
+	if err != nil {
+		return ShareAlias{}, false, err
+	}
+	if last.Valid {
+		alias.LastRedirectedAt = last.Time
+	}
+	return alias, true, nil
+}
+
+func (s *PostgresMetadataStore) RecordAliasRedirect(ctx context.Context, slug string) error {
+	result, err := s.db.ExecContext(ctx, `UPDATE aliases SET redirect_count = redirect_count + 1, last_redirected_at = now() WHERE slug = $1`, slug)
+	if err != nil {
+		return err
+	}
+	if count, err := result.RowsAffected(); err == nil && count == 0 {
+		return fmt.Errorf("alias %q not found", slug)
+	}
+	return nil
+}
+
+func (s *PostgresMetadataStore) ListAliases(ctx context.Context, owner string, limit int) ([]ShareAlias, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 50
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT
+			a.slug, a.object_sha256, o.object_key, a.owner_subject, a.display_filename, a.visibility,
+			a.created_at, a.updated_at, a.redirect_count, a.last_redirected_at,
+			o.size_bytes, o.content_type
+		FROM aliases a
+		JOIN objects o ON o.sha256 = a.object_sha256
+		WHERE a.owner_subject = $1
+		ORDER BY a.updated_at DESC
+		LIMIT $2`, owner, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var aliases []ShareAlias
+	for rows.Next() {
+		var alias ShareAlias
+		var last sql.NullTime
+		if err := rows.Scan(
+			&alias.Slug,
+			&alias.ObjectSHA256,
+			&alias.ObjectKey,
+			&alias.Owner,
+			&alias.DisplayFilename,
+			&alias.Visibility,
+			&alias.CreatedAt,
+			&alias.UpdatedAt,
+			&alias.RedirectCount,
+			&last,
+			&alias.Size,
+			&alias.ContentType,
+		); err != nil {
+			return nil, err
+		}
+		if last.Valid {
+			alias.LastRedirectedAt = last.Time
+		}
+		aliases = append(aliases, alias)
+	}
+	return aliases, rows.Err()
+}
