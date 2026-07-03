@@ -2,10 +2,16 @@ const DB_NAME = "b2-share-pwa";
 const DB_VERSION = 1;
 const STORE_NAME = "pending";
 const PENDING_KEY = "current";
+const MEDIA_ANALYSIS_BYTES = 2 * 1024 * 1024;
+const DEFERRED_VIDEO_ACTIONS = Object.freeze([
+  { kind: "remux", status: "deferred", requires: "media-worker" },
+  { kind: "transcode", status: "deferred", requires: "gpu-capacity" }
+]);
 
 const state = {
   session: { authenticated: false },
   file: null,
+  mediaPlan: null,
   publicUrl: "",
   shares: []
 };
@@ -39,6 +45,7 @@ function bindElements() {
     "dropzone",
     "fileTitle",
     "fileMeta",
+    "mediaWarning",
     "statusText",
     "uploadButton",
     "clearButton",
@@ -158,8 +165,26 @@ async function loadPendingShare() {
 
 function setFile(file) {
   state.file = file;
+  state.mediaPlan = null;
   state.publicUrl = "";
   render();
+  if (!file) {
+    return;
+  }
+  inspectMediaPlan(file)
+    .then((plan) => {
+      if (state.file !== file) {
+        return;
+      }
+      state.mediaPlan = plan;
+      render();
+    })
+    .catch(() => {
+      if (state.file === file) {
+        state.mediaPlan = null;
+        render();
+      }
+    });
 }
 
 function render() {
@@ -171,6 +196,9 @@ function render() {
   els.resultPanel.classList.toggle("hidden", !state.publicUrl);
   els.historyPanel.classList.toggle("hidden", !state.session.authenticated || state.shares.length === 0);
   els.resultUrl.textContent = state.publicUrl;
+  const warning = state.mediaPlan && state.mediaPlan.warning ? state.mediaPlan.warning : "";
+  els.mediaWarning.textContent = warning;
+  els.mediaWarning.classList.toggle("hidden", !warning);
   if (state.file) {
     els.fileTitle.textContent = state.file.name || "upload";
     els.fileMeta.textContent = `${formatBytes(state.file.size)} - ${state.file.type || "application/octet-stream"}`;
@@ -313,7 +341,17 @@ function renderShares() {
     links.className = "history-links";
     links.append(historyLink("Share", share.publicUrl), historyLink("B2", share.b2Url));
 
-    item.append(title, meta, links);
+    const deleteButton = document.createElement("button");
+    deleteButton.className = "button danger compact";
+    deleteButton.type = "button";
+    deleteButton.textContent = "Delete";
+    deleteButton.addEventListener("click", () => deleteShare(share));
+
+    const actions = document.createElement("div");
+    actions.className = "history-actions";
+    actions.append(links, deleteButton);
+
+    item.append(title, meta, actions);
     els.historyList.append(item);
   }
 }
@@ -348,6 +386,91 @@ async function shareResult() {
     return;
   }
   await navigator.share({ url: state.publicUrl });
+}
+
+async function deleteShare(share) {
+  if (!share || !share.slug) {
+    return;
+  }
+  if (!window.confirm("Delete this share URL?")) {
+    return;
+  }
+  try {
+    await apiFetch(`/api/shares/${encodeURIComponent(share.slug)}`, { method: "DELETE" });
+    state.shares = state.shares.filter((item) => item.slug !== share.slug);
+    if (state.publicUrl === share.publicUrl) {
+      state.publicUrl = "";
+    }
+    setStatus("Deleted");
+    render();
+  } catch (error) {
+    setStatus(error.message || "Delete failed.", true);
+  }
+}
+
+async function inspectMediaPlan(file) {
+  if (!looksLikeMP4(file)) {
+    return null;
+  }
+  const sample = await file.slice(0, Math.min(file.size, MEDIA_ANALYSIS_BYTES)).arrayBuffer();
+  const boxes = parseMP4TopLevelBoxes(sample);
+  const mdat = boxes.find((box) => box.type === "mdat");
+  const moov = boxes.find((box) => box.type === "moov");
+  if (mdat && (!moov || mdat.offset < moov.offset)) {
+    return {
+      kind: "video/mp4",
+      status: "warning",
+      code: "mp4_moov_after_mdat",
+      warning: "MP4 metadata is at the end; inline players may stall until it is remuxed.",
+      actions: DEFERRED_VIDEO_ACTIONS
+    };
+  }
+  return null;
+}
+
+function looksLikeMP4(file) {
+  const name = (file.name || "").toLowerCase();
+  return file.type === "video/mp4" || name.endsWith(".mp4") || name.endsWith(".m4v");
+}
+
+function parseMP4TopLevelBoxes(buffer) {
+  const view = new DataView(buffer);
+  const boxes = [];
+  let offset = 0;
+  while (offset + 8 <= view.byteLength) {
+    let size = view.getUint32(offset);
+    const type = readBoxType(view, offset + 4);
+    let headerSize = 8;
+    if (size === 1 && offset + 16 <= view.byteLength) {
+      const high = view.getUint32(offset + 8);
+      const low = view.getUint32(offset + 12);
+      size = high * 2 ** 32 + low;
+      headerSize = 16;
+    } else if (size === 0) {
+      size = view.byteLength - offset;
+    }
+    if (!type || size < headerSize) {
+      break;
+    }
+    boxes.push({ type, offset, size });
+    if (offset + size > view.byteLength) {
+      break;
+    }
+    offset += size;
+  }
+  return boxes;
+}
+
+function readBoxType(view, offset) {
+  let value = "";
+  for (let index = 0; index < 4; index += 1) {
+    const code = view.getUint8(offset + index);
+    if (code < 32 || code > 126) {
+      return "";
+    }
+    value += String.fromCharCode(code);
+  }
+  return value;
 }
 
 function formatBytes(bytes) {
