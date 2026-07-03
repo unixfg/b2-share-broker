@@ -82,6 +82,7 @@ func NewServerWithLogin(cfg Config, auth Authenticator, login *OIDCLogin, store 
 	server.mux.HandleFunc("/api/uploads", server.handleCreateUpload)
 	server.mux.HandleFunc("/api/uploads/complete", server.handleCompleteUpload)
 	server.mux.HandleFunc("/api/shares", server.handleListShares)
+	server.mux.HandleFunc("/api/shares/", server.handleShare)
 	server.mux.HandleFunc("/share-target", server.handleShareTargetFallback)
 	server.registerWebRoutes()
 	return server
@@ -392,6 +393,39 @@ func (s *Server) handleListShares(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, listSharesResponse{Shares: aliases})
 }
 
+func (s *Server) handleShare(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		w.Header().Set("Allow", "DELETE")
+		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	authenticated, err := s.auth.Authenticate(r)
+	if err != nil {
+		writeAuthError(w, err)
+		return
+	}
+	if err := requireCSRF(authenticated, r); err != nil {
+		writeAuthError(w, err)
+		return
+	}
+	slug, ok := slugFromEscapedPath(r.URL.EscapedPath(), "/api/shares/")
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	deleted, err := s.metadata.DeleteAlias(r.Context(), slug, authenticated.Principal.Subject)
+	if err != nil {
+		s.logger.Error("failed to delete share alias", "slug", slug, "error", err)
+		writeJSONError(w, http.StatusInternalServerError, "failed to delete share")
+		return
+	}
+	if !deleted {
+		http.NotFound(w, r)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (s *Server) handleShareTargetFallback(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet || r.Method == http.MethodHead {
 		http.Redirect(w, r, "/share", http.StatusFound)
@@ -406,11 +440,14 @@ func (s *Server) handleShareTargetFallback(w http.ResponseWriter, r *http.Reques
 }
 
 func shareSlugFromPath(escapedPath string) (string, bool) {
-	const sharePrefix = "/s/"
-	if !strings.HasPrefix(escapedPath, sharePrefix) {
+	return slugFromEscapedPath(escapedPath, "/s/")
+}
+
+func slugFromEscapedPath(escapedPath, prefix string) (string, bool) {
+	if !strings.HasPrefix(escapedPath, prefix) {
 		return "", false
 	}
-	escapedSlug := strings.TrimPrefix(escapedPath, sharePrefix)
+	escapedSlug := strings.TrimPrefix(escapedPath, prefix)
 	if escapedSlug == "" || strings.Contains(escapedSlug, "/") {
 		return "", false
 	}

@@ -7,7 +7,11 @@
   --line: #d9d4cb;
   --accent: #216e4e;
   --accent-ink: #ffffff;
+  --danger: #8d2525;
+  --danger-ink: #ffffff;
   --warn: #9b2f28;
+  --warn-bg: #fff2c2;
+  --warn-line: #dfb94d;
   --focus: #7c5cff;
 }
 
@@ -192,6 +196,17 @@ h2 {
   color: var(--ink);
 }
 
+.button.danger {
+  background: var(--danger);
+  color: var(--danger-ink);
+}
+
+.button.compact {
+  min-height: 34px;
+  padding: 0 12px;
+  font-size: 0.9rem;
+}
+
 .button:disabled {
   cursor: not-allowed;
   opacity: 0.48;
@@ -209,6 +224,16 @@ h2 {
   border-radius: 8px;
   overflow-wrap: anywhere;
   background: #fbfaf7;
+}
+
+.media-warning {
+  margin: 12px 0 0;
+  padding: 10px 12px;
+  border: 1px solid var(--warn-line);
+  border-radius: 8px;
+  background: var(--warn-bg);
+  color: #5f4200;
+  font-size: 0.92rem;
 }
 
 .history-list {
@@ -231,12 +256,22 @@ h2 {
 }
 
 .history-meta,
-.history-links {
+.history-links,
+.history-actions {
   display: flex;
   flex-wrap: wrap;
   gap: 8px 12px;
+}
+
+.history-meta,
+.history-links {
   color: var(--muted);
   font-size: 0.9rem;
+}
+
+.history-actions {
+  align-items: center;
+  justify-content: space-between;
 }
 
 .history-links a {

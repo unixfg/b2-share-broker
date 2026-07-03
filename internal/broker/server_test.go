@@ -108,11 +108,22 @@ func (m *memoryMetadata) RecordAliasRedirect(_ context.Context, slug string) err
 func (m *memoryMetadata) ListAliases(_ context.Context, owner string, _ int) ([]ShareAlias, error) {
 	var aliases []ShareAlias
 	for _, alias := range m.aliases {
-		if alias.Owner == owner {
+		if alias.Owner == owner && alias.Visibility != "deleted" {
 			aliases = append(aliases, alias)
 		}
 	}
 	return aliases, nil
+}
+
+func (m *memoryMetadata) DeleteAlias(_ context.Context, slug, owner string) (bool, error) {
+	alias, ok := m.aliases[slug]
+	if !ok || alias.Owner != owner || alias.Visibility == "deleted" {
+		return false, nil
+	}
+	alias.Visibility = "deleted"
+	alias.UpdatedAt = time.Date(2026, 6, 28, 12, 2, 0, 0, time.UTC)
+	m.aliases[slug] = alias
+	return true, nil
 }
 
 func testConfig() Config {
@@ -449,11 +460,27 @@ func TestPublicShareRejectsUnknownOrNestedAliases(t *testing.T) {
 	}
 }
 
+func TestPublicShareRejectsDeletedAlias(t *testing.T) {
+	metadata := newMemoryMetadata()
+	metadata.objects[testSHA256] = StoredObject{SHA256: testSHA256, ObjectKey: "s/" + testSHA256 + ".txt", Size: 12, ContentType: "text/plain"}
+	metadata.aliases["deleted.txt"] = ShareAlias{Slug: "deleted.txt", ObjectSHA256: testSHA256, ObjectKey: "s/" + testSHA256 + ".txt", Visibility: "deleted"}
+	server := NewServer(testConfig(), fakeAuth{err: ErrUnauthorized}, &fakeStore{}, metadata, slog.Default())
+	request := httptest.NewRequest(http.MethodGet, "/s/deleted.txt", nil)
+	recorder := httptest.NewRecorder()
+
+	server.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusNotFound)
+	}
+}
+
 func TestListSharesReturnsAuthenticatedUserHistory(t *testing.T) {
 	metadata := newMemoryMetadata()
 	metadata.objects[testSHA256] = StoredObject{SHA256: testSHA256, ObjectKey: "s/" + testSHA256 + ".txt", Size: 12, ContentType: "text/plain"}
 	metadata.aliases["mine.txt"] = ShareAlias{Slug: "mine.txt", ObjectSHA256: testSHA256, ObjectKey: "s/" + testSHA256 + ".txt", Owner: "user-1", DisplayFilename: "mine.txt", Visibility: "public"}
 	metadata.aliases["other.txt"] = ShareAlias{Slug: "other.txt", ObjectSHA256: testSHA256, ObjectKey: "s/" + testSHA256 + ".txt", Owner: "user-2", Visibility: "public"}
+	metadata.aliases["deleted.txt"] = ShareAlias{Slug: "deleted.txt", ObjectSHA256: testSHA256, ObjectKey: "s/" + testSHA256 + ".txt", Owner: "user-1", Visibility: "deleted"}
 	server := NewServer(testConfig(), authenticatedFakeAuth("user-1"), &fakeStore{}, metadata, slog.Default())
 	request := httptest.NewRequest(http.MethodGet, "/api/shares", nil)
 	recorder := httptest.NewRecorder()
@@ -469,6 +496,57 @@ func TestListSharesReturnsAuthenticatedUserHistory(t *testing.T) {
 	}
 	if len(response.Shares) != 1 || response.Shares[0].PublicURL != "https://share.doesthings.online/s/mine.txt" {
 		t.Fatalf("response = %#v", response)
+	}
+}
+
+func TestDeleteShareSoftDeletesOwnedAlias(t *testing.T) {
+	metadata := newMemoryMetadata()
+	metadata.objects[testSHA256] = StoredObject{SHA256: testSHA256, ObjectKey: "s/" + testSHA256 + ".txt", Size: 12, ContentType: "text/plain"}
+	metadata.aliases["mine.txt"] = ShareAlias{Slug: "mine.txt", ObjectSHA256: testSHA256, ObjectKey: "s/" + testSHA256 + ".txt", Owner: "user-1", Visibility: "public"}
+	server := NewServer(testConfig(), authenticatedFakeAuth("user-1"), &fakeStore{}, metadata, slog.Default())
+	request := httptest.NewRequest(http.MethodDelete, "/api/shares/mine.txt", nil)
+	setCSRF(request)
+	recorder := httptest.NewRecorder()
+
+	server.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	if metadata.aliases["mine.txt"].Visibility != "deleted" {
+		t.Fatalf("alias visibility = %q", metadata.aliases["mine.txt"].Visibility)
+	}
+}
+
+func TestDeleteShareRequiresOwner(t *testing.T) {
+	metadata := newMemoryMetadata()
+	metadata.objects[testSHA256] = StoredObject{SHA256: testSHA256, ObjectKey: "s/" + testSHA256 + ".txt", Size: 12, ContentType: "text/plain"}
+	metadata.aliases["other.txt"] = ShareAlias{Slug: "other.txt", ObjectSHA256: testSHA256, ObjectKey: "s/" + testSHA256 + ".txt", Owner: "user-2", Visibility: "public"}
+	server := NewServer(testConfig(), authenticatedFakeAuth("user-1"), &fakeStore{}, metadata, slog.Default())
+	request := httptest.NewRequest(http.MethodDelete, "/api/shares/other.txt", nil)
+	setCSRF(request)
+	recorder := httptest.NewRecorder()
+
+	server.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusNotFound)
+	}
+	if metadata.aliases["other.txt"].Visibility != "public" {
+		t.Fatalf("alias visibility = %q", metadata.aliases["other.txt"].Visibility)
+	}
+}
+
+func TestDeleteShareRejectsMissingCSRFToken(t *testing.T) {
+	metadata := newMemoryMetadata()
+	server := NewServer(testConfig(), authenticatedFakeAuth("user-1"), &fakeStore{}, metadata, slog.Default())
+	request := httptest.NewRequest(http.MethodDelete, "/api/shares/mine.txt", nil)
+	recorder := httptest.NewRecorder()
+
+	server.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusForbidden)
 	}
 }
 

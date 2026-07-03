@@ -45,6 +45,7 @@ type MetadataStore interface {
 	GetAlias(ctx context.Context, slug string) (ShareAlias, bool, error)
 	RecordAliasRedirect(ctx context.Context, slug string) error
 	ListAliases(ctx context.Context, owner string, limit int) ([]ShareAlias, error)
+	DeleteAlias(ctx context.Context, slug, owner string) (bool, error)
 }
 
 type PostgresMetadataStore struct {
@@ -280,6 +281,7 @@ func (s *PostgresMetadataStore) ListAliases(ctx context.Context, owner string, l
 		FROM aliases a
 		JOIN objects o ON o.sha256 = a.object_sha256
 		WHERE a.owner_subject = $1
+			AND a.visibility <> 'deleted'
 		ORDER BY a.updated_at DESC
 		LIMIT $2`, owner, limit)
 	if err != nil {
@@ -313,4 +315,20 @@ func (s *PostgresMetadataStore) ListAliases(ctx context.Context, owner string, l
 		aliases = append(aliases, alias)
 	}
 	return aliases, rows.Err()
+}
+
+func (s *PostgresMetadataStore) DeleteAlias(ctx context.Context, slug, owner string) (bool, error) {
+	result, err := s.db.ExecContext(ctx, `UPDATE aliases
+		SET visibility = 'deleted', updated_at = now()
+		WHERE slug = $1
+			AND owner_subject = $2
+			AND visibility <> 'deleted'`, slug, owner)
+	if err != nil {
+		return false, err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
 }
