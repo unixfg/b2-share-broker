@@ -18,8 +18,13 @@ async function init() {
   bindElements();
   bindEvents();
   await registerServiceWorker();
-  await loadPendingShare();
   await refreshSession();
+  if (!state.session.authenticated) {
+    redirectToLogin();
+    return;
+  }
+  document.body.classList.remove("auth-pending");
+  await loadPendingShare();
   await loadShares();
   render();
 }
@@ -27,7 +32,6 @@ async function init() {
 function bindElements() {
   for (const id of [
     "sessionLabel",
-    "loginLink",
     "logoutLink",
     "uploadForm",
     "fileInput",
@@ -50,7 +54,6 @@ function bindElements() {
 }
 
 function bindEvents() {
-  els.loginLink.href = `/auth/login?return_to=${encodeURIComponent(location.pathname + location.search)}`;
   els.fileInput.addEventListener("change", () => {
     const files = Array.from(els.fileInput.files || []);
     if (files.length === 1) {
@@ -118,6 +121,12 @@ async function refreshSession() {
   state.session = await response.json();
 }
 
+function redirectToLogin() {
+  els.sessionLabel.textContent = "Signing in";
+  const returnTo = location.pathname + location.search;
+  location.replace(`/auth/login?return_to=${encodeURIComponent(returnTo)}`);
+}
+
 async function loadShares() {
   if (!state.session.authenticated) {
     state.shares = [];
@@ -155,8 +164,7 @@ function setFile(file) {
 
 function render() {
   const user = state.session.user || {};
-  els.sessionLabel.textContent = state.session.authenticated ? (user.email || user.preferred_username || "Signed in") : "Signed out";
-  els.loginLink.classList.toggle("hidden", state.session.authenticated);
+  els.sessionLabel.textContent = user.email || user.preferred_username || "Signed in";
   els.logoutLink.classList.toggle("hidden", !state.session.authenticated);
   els.uploadButton.disabled = !state.file;
   els.clearButton.disabled = !state.file && !state.publicUrl;

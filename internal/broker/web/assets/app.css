@@ -40,6 +40,10 @@ input {
   padding: 24px;
 }
 
+body.auth-pending main {
+  display: none;
+}
+
 .topbar {
   display: flex;
   align-items: center;

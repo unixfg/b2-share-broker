@@ -523,6 +523,12 @@ func TestWebRoutesServeAppAndManifest(t *testing.T) {
 		if !strings.Contains(recorder.Body.String(), `<link rel="manifest" href="/manifest.webmanifest">`) {
 			t.Fatalf("%s did not serve the app shell", path)
 		}
+		if !strings.Contains(recorder.Body.String(), `<body class="auth-pending">`) {
+			t.Fatalf("%s app shell should hide upload UI until auth check", path)
+		}
+		if strings.Contains(recorder.Body.String(), `>Sign in<`) {
+			t.Fatalf("%s app shell should not render a manual sign-in button", path)
+		}
 	}
 
 	request := httptest.NewRequest(http.MethodGet, "/manifest.webmanifest", nil)
