@@ -7,21 +7,24 @@ import (
 )
 
 const (
-	ProcessingProfileMP4FaststartRemux = "mp4-faststart-remux"
-	ProcessingProfileMP4H264AACDiscord = "mp4-h264-aac-discord"
+	ProcessingProfileUploadFinalize = "upload-finalize"
+	ProcessingProfileMP4Web         = "mp4-web"
 
 	ProcessingStatusQueued    = "queued"
 	ProcessingStatusRunning   = "running"
 	ProcessingStatusCompleted = "completed"
 	ProcessingStatusFailed    = "failed"
+	ProcessingStatusCanceled  = "canceled"
+
+	AliasStatusPending = "pending"
+	AliasStatusReady   = "ready"
+	AliasStatusFailed  = "failed"
 )
 
 func ValidateProcessingProfile(profile string) error {
 	switch profile {
-	case ProcessingProfileMP4FaststartRemux:
+	case ProcessingProfileUploadFinalize, ProcessingProfileMP4Web:
 		return nil
-	case ProcessingProfileMP4H264AACDiscord:
-		return fmt.Errorf("profile %q is not enabled", profile)
 	default:
 		return fmt.Errorf("unsupported profile %q", profile)
 	}

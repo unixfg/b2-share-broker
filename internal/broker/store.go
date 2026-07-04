@@ -3,21 +3,14 @@ package broker
 import (
 	"context"
 	"io"
-	"net/http"
 	"net/url"
 	"strings"
-	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
-
-type PresignedUpload struct {
-	URL    string
-	Header http.Header
-}
 
 type ObjectMetadata struct {
 	ContentLength int64
@@ -26,16 +19,15 @@ type ObjectMetadata struct {
 }
 
 type ObjectStore interface {
-	PresignPutObject(ctx context.Context, key, contentType string, size int64, ttl time.Duration) (PresignedUpload, error)
 	HeadObject(ctx context.Context, key string) (ObjectMetadata, error)
 	DownloadObject(ctx context.Context, key string, writer io.Writer) error
 	PutObject(ctx context.Context, key, contentType string, size int64, reader io.Reader) (ObjectMetadata, error)
+	DeleteObject(ctx context.Context, key string) error
 }
 
 type B2Store struct {
-	bucket    string
-	client    *s3.Client
-	presigner *s3.PresignClient
+	bucket string
+	client *s3.Client
 }
 
 func NewB2Store(ctx context.Context, cfg Config) (*B2Store, error) {
@@ -51,27 +43,8 @@ func NewB2Store(ctx context.Context, cfg Config) (*B2Store, error) {
 		options.UsePathStyle = true
 	})
 	return &B2Store{
-		bucket:    cfg.B2Bucket,
-		client:    client,
-		presigner: s3.NewPresignClient(client),
-	}, nil
-}
-
-func (s *B2Store) PresignPutObject(ctx context.Context, key, contentType string, size int64, ttl time.Duration) (PresignedUpload, error) {
-	response, err := s.presigner.PresignPutObject(ctx, &s3.PutObjectInput{
-		Bucket:        aws.String(s.bucket),
-		Key:           aws.String(key),
-		ContentLength: aws.Int64(size),
-		ContentType:   aws.String(contentType),
-	}, func(options *s3.PresignOptions) {
-		options.Expires = ttl
-	})
-	if err != nil {
-		return PresignedUpload{}, err
-	}
-	return PresignedUpload{
-		URL:    response.URL,
-		Header: response.SignedHeader,
+		bucket: cfg.B2Bucket,
+		client: client,
 	}, nil
 }
 
@@ -120,6 +93,14 @@ func (s *B2Store) PutObject(ctx context.Context, key, contentType string, size i
 		ContentType:   contentType,
 		ETag:          strings.Trim(aws.ToString(response.ETag), `"`),
 	}, nil
+}
+
+func (s *B2Store) DeleteObject(ctx context.Context, key string) error {
+	_, err := s.client.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(key),
+	})
+	return err
 }
 
 func PublicURL(baseURL, objectKey string) string {

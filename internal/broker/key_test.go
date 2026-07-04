@@ -21,8 +21,8 @@ func TestSanitizeFilename(t *testing.T) {
 }
 
 func TestGenerateObjectKey(t *testing.T) {
-	key := GenerateObjectKey("s", strings.Repeat("a", 64), ".txt")
-	if key != "s/"+strings.Repeat("a", 64)+".txt" {
+	key := GenerateObjectKey(strings.Repeat("a", 64), ".txt")
+	if key != "aa/"+strings.Repeat("a", 64)+".txt" {
 		t.Fatalf("unexpected key: %s", key)
 	}
 }
@@ -54,7 +54,7 @@ func TestGenerateAliasSlug(t *testing.T) {
 func TestNormalizeManualAlias(t *testing.T) {
 	tests := map[string]string{
 		"Latest Screenshot": "latest-screenshot.png",
-		"/s/Report.PDF":     "report.pdf",
+		"/s/Report.PDF":     "report.png",
 		"../bad name":       "bad-name.txt",
 	}
 	for input, want := range tests {
@@ -65,6 +65,19 @@ func TestNormalizeManualAlias(t *testing.T) {
 		if got := NormalizeManualAlias(input, ext); got != want {
 			t.Fatalf("NormalizeManualAlias(%q) = %q, want %q", input, got, want)
 		}
+	}
+}
+
+func TestGenerateRandomAliasSlugUsesFilenameAndFinalExtension(t *testing.T) {
+	slug, err := GenerateRandomAliasSlug("Clip MOV.mov", ".mp4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(slug, "-clip_mov.mp4") {
+		t.Fatalf("slug = %q", slug)
+	}
+	if len(strings.TrimSuffix(slug, "-clip_mov.mp4")) != 16 {
+		t.Fatalf("slug = %q", slug)
 	}
 }
 

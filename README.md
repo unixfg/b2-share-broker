@@ -1,12 +1,13 @@
 # b2-share-broker
 
-Installable web app for uploading personal share files directly to a public
+Installable web share app for publishing one file at a time to a public
 Backblaze B2 bucket.
 
-The broker never handles file bytes. The browser authenticates with Keycloak,
-hashes the selected file with SHA-256, asks the broker for a presigned
-S3-compatible PUT URL when the content is new, uploads one file directly to B2,
-then receives a public unlisted URL to copy or share.
+The browser authenticates with Keycloak, sends the selected file to the
+same-origin upload API, and immediately receives an unlisted share URL. A
+single internal processor stages the bytes, normalizes video to web-friendly
+MP4, hashes the final bytes, uploads only the final object to B2, and marks the
+share ready.
 
 ## Web App
 
@@ -28,187 +29,131 @@ Unauthenticated health check.
 
 ### `GET /s/{slug}`
 
-Unauthenticated public share link. The broker looks up `slug` in Postgres and
-redirects public aliases to the stored native public B2 URL.
+Unauthenticated public share link.
+
+- Pending shares return a minimal processing page.
+- Failed shares return a minimal unavailable page.
+- Ready shares increment redirect stats and redirect to the native public B2
+  URL.
 
 The cluster does not proxy downloaded file bytes.
 
 ### `GET /api/session`
 
-Returns the current browser session state. Authenticated responses include a
-CSRF token that must be sent in `X-CSRF-Token` on unsafe API requests.
+Returns the current browser session state. Authenticated browser responses
+include a CSRF token that must be sent in `X-CSRF-Token` on unsafe API requests.
 
 ### `POST /api/uploads`
 
-Requires the authenticated browser session cookie and a matching
-`X-CSRF-Token` header.
+Accepts either an authenticated browser session plus CSRF token or a Keycloak
+OIDC bearer token with the configured share role.
 
-Request:
+Request is `multipart/form-data`:
 
-```json
-{
-  "filename": "Screenshot 1.png",
-  "contentType": "image/png",
-  "size": 12345,
-  "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-  "alias": "optional-custom-name"
-}
-```
-
-New-content response:
-
-```json
-{
-  "uploadUrl": "https://...",
-  "requiredHeaders": {
-    "Content-Type": "image/png"
-  },
-  "objectKey": "s/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.png",
-  "uploadToken": "...",
-  "publicUrl": "https://share.doesthings.online/s/hmacalias.png",
-  "b2Url": "https://<bucket>.s3.us-west-004.backblazeb2.com/s/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.png",
-  "alreadyUploaded": false
-}
-```
-
-The browser must upload the file bytes to `uploadUrl` with every returned
-`requiredHeaders` value.
-
-If the SHA-256 already exists in metadata, the response has
-`alreadyUploaded: true`, omits `uploadUrl` and `uploadToken`, and records only
-the new alias. When that source object has a completed derivative, such as an
-MP4 fast-start remux, the alias points at the derivative so repeat shares keep
-serving the optimized object instead of reverting to the original bytes.
-
-### `POST /api/uploads/complete`
-
-Requires the same authenticated browser session that created the upload target.
-
-Request:
-
-```json
-{
-  "uploadToken": "..."
-}
-```
+- `file`: required, exactly one file
+- `alias`: optional custom share slug
 
 Response:
 
 ```json
 {
-  "objectKey": "s/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.png",
-  "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-  "publicUrl": "https://share.doesthings.online/s/hmacalias.png",
-  "b2Url": "https://<bucket>.s3.us-west-004.backblazeb2.com/s/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.png",
-  "verified": true,
-  "size": 12345,
-  "etag": "..."
+  "shareUrl": "https://share.doesthings.online/s/0123abcd89ef4567-screenshot_1.png",
+  "slug": "0123abcd89ef4567-screenshot_1.png",
+  "jobId": "9f4e04ba-4a59-4d5b-aa08-74827eea7469",
+  "status": "queued"
 }
 ```
 
-The broker records object and alias metadata only after the B2 `HEAD` check
-verifies the object.
+Generated aliases use a random 16-hex prefix plus a sanitized filename and the
+final output extension. Video uploads get `.mp4` aliases because the processor
+normalizes them before publication.
+
+### `GET /api/uploads/{jobId}`
+
+Returns owner-only upload processing status. Completed jobs include the target
+SHA-256 and B2 object key.
 
 ### `GET /api/shares`
 
-Requires an authenticated browser session. Returns recent aliases owned by the
-current subject with filenames, sizes, content types, redirect counts, share
-URLs, and native B2 URLs.
+Returns recent aliases owned by the current subject with filenames, sizes,
+content types, status, redirect counts, share URLs, and native B2 URLs when the
+share is ready.
 
 ### `DELETE /api/shares/{slug}`
 
-Requires an authenticated browser session and `X-CSRF-Token`. Deletion is a
-soft delete of the alias only: the B2 object stays in place, the alias row stays
-in Postgres, and re-sharing the same slug revives that row without resetting its
-redirect count or last redirected timestamp.
+Requires owner auth. Browser requests also require `X-CSRF-Token`.
 
-### `POST /api/shares/{slug}/processing-jobs`
+Deletion keeps the alias row as soft-deleted metadata so redirect counts and
+history survive. Staged files and queued jobs for that alias are removed or
+canceled. The B2 object is hard-deleted only when no non-deleted aliases still
+reference it.
 
-Requires an authenticated browser session and `X-CSRF-Token`. Creates or returns
-an in-flight owner-only processing job for a share alias.
+## Object Storage
 
-Request:
+Final B2 object keys are content addressed and hash-sharded:
 
-```json
-{
-  "profile": "mp4-faststart-remux"
-}
+```text
+20/2040110d78c97a48adc44851416f84662225d97af8798dbc2028359c843f08aa.mov
+9d/9d2bb548dd140297cfdc2d1ab1d437b9e8604401279b6bcda1790700ee5f8827.mp4
 ```
 
-Response:
+Before skipping an upload for an existing metadata row, the processor verifies
+the B2 object with `HEAD`. If the bucket object is missing, metadata is marked
+unavailable and the final bytes are uploaded again.
 
-```json
-{
-  "jobId": "9f4e04ba-4a59-4d5b-aa08-74827eea7469",
-  "status": "queued",
-  "profile": "mp4-faststart-remux",
-  "aliasSlug": "hmacalias.mp4",
-  "sourceSha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-}
+## Processing
+
+The image includes these entrypoints:
+
+- `/usr/local/bin/b2-share-broker`: HA browser app, auth routes, history, and
+  public redirects.
+- `/usr/local/bin/b2-share-processor`: single-concurrency upload API plus queue
+  worker with staging storage.
+- `/usr/local/bin/b2-share-transcoder`: worker-only compatibility entrypoint.
+
+The processor runs one job at a time. Non-video files are hashed and uploaded as
+staged. Video files first try:
+
+```bash
+ffmpeg -hide_banner -y -i input -map 0 -c copy -movflags +faststart output.mp4
 ```
 
-V1 enables only `mp4-faststart-remux`. The future
-`mp4-h264-aac-discord` profile name is reserved but disabled.
+If remux fails or the remuxed MP4 is not H.264/AAC, the processor transcodes to
+H.264/AAC MP4 with `h264_nvenc`. Original uploaded bytes are temporary staging
+files and are not uploaded to the public bucket.
 
-### `GET /api/processing-jobs/{jobId}`
-
-Requires an authenticated browser session. Returns the owner-only processing job
-status. Completed jobs include the target SHA-256/object key.
-
-## Broker Configuration
+## Configuration
 
 Required environment variables:
 
 - `OIDC_ISSUER_URL`: Keycloak issuer, for bees
-  `https://auth.doesthings.io/realms/doesthings.io`
+  `https://auth.doesthings.online/realms/doesthings.online`
 - `OIDC_CLIENT_ID`: Keycloak web client ID, for bees `b2-share-web`
 - `OIDC_CLIENT_SECRET`: Keycloak confidential client secret
-- `OIDC_ALLOWED_SUBJECTS`: comma-separated allowed Keycloak subject IDs
+- `OIDC_AUDIENCE`: bearer-token audience, defaults to `OIDC_CLIENT_ID`
+- `OIDC_REQUIRED_ROLES`: comma-separated Keycloak realm or client roles,
+  defaults to `b2-share-user`
 - `B2_ENDPOINT`: S3-compatible endpoint, for bees
   `https://s3.us-west-004.backblazeb2.com`
 - `B2_REGION`: defaults to `us-west-004`
 - `B2_BUCKET`: existing public B2 bucket name
-- `B2_PUBLIC_BASE_URL`: native public base URL for redirects to the bucket, for
-  example
-  `https://<bucket>.s3.us-west-004.backblazeb2.com`
+- `B2_PUBLIC_BASE_URL`: native public base URL for redirects to the bucket
 - `PUBLIC_BASE_URL`: public base URL returned to users, for bees
-  `https://share.doesthings.online`; defaults to `B2_PUBLIC_BASE_URL`
+  `https://share.doesthings.online`
 - `AWS_ACCESS_KEY_ID` or `ACCESS_KEY_ID`: B2 application key ID
 - `AWS_SECRET_ACCESS_KEY` or `ACCESS_SECRET_KEY`: B2 application key
 - `DATABASE_URL`: Postgres URL for share metadata
-- `UPLOAD_TOKEN_KEY`: at least 32 bytes, or base64 encoding of at least 32 bytes
-- `ALIAS_HMAC_KEY`: at least 32 bytes, or base64 encoding of at least 32 bytes
 - `SESSION_AUTH_KEY`: at least 32 bytes, or base64 encoding of at least 32 bytes
 
 Optional environment variables:
 
-- `OBJECT_PREFIX`: defaults to `s`
 - `MAX_UPLOAD_BYTES`: defaults to `536870912`
-- `PRESIGN_TTL_SECONDS`: defaults to `900`
-- `UPLOAD_TOKEN_TTL_SECONDS`: defaults to `3600`
 - `SESSION_TTL_SECONDS`: defaults to `43200`
 - `PORT` or `LISTEN_ADDR`: defaults to `:8080`
 - `FFMPEG_PATH`: defaults to `ffmpeg`
 - `TRANSCODER_WORK_DIR`: defaults to `/work`
 - `TRANSCODER_POLL_SECONDS`: defaults to `5`
-
-## Transcoder Worker
-
-The container image includes two entrypoints:
-
-- `/usr/local/bin/b2-share-broker`: browser app and API
-- `/usr/local/bin/b2-share-transcoder`: internal queue worker
-
-The worker polls Postgres for queued jobs, runs one job at a time, downloads the
-source B2 object, executes:
-
-```bash
-ffmpeg -hide_banner -y -i input.mp4 -map 0 -c copy -movflags +faststart output.mp4
-```
-
-Then it hashes the output, uploads it as `s/<sha256>.mp4` if not already known,
-records the derivative, and repoints the existing alias. Original uploaded B2
-objects are retained.
+- `STAGING_DIR`: defaults to `/staging`
 
 ## Keycloak Setup
 
@@ -221,41 +166,29 @@ Minimum client settings:
 - Client authentication enabled
 - Valid redirect URIs include
   `https://share.doesthings.online/auth/callback`
+- Valid post logout redirect URIs include `https://share.doesthings.online/`
 - Web origins include `https://share.doesthings.online`
 - No localhost redirect URI
 
-After the first login, inspect the token subject and set
-`OIDC_ALLOWED_SUBJECTS` in the GitOps ConfigMap.
-
-## B2 CORS
-
-The bucket must allow browser PUT uploads from
-`https://share.doesthings.online`, including:
-
-- Allowed origin: `https://share.doesthings.online`
-- Allowed operations/methods: `s3_put`, `s3_head`, `s3_get`
-- Allowed headers: `authorization`, `content-type`, `x-amz-*`
-- Expose headers: `etag`
+Grant users a realm role or `b2-share-web` client role matching
+`OIDC_REQUIRED_ROLES`, normally `b2-share-user`.
 
 ## GitOps Deployment
 
 The bees deployment lives in `github.com/unixfg/gitops` under
 `apps/b2-share-broker`.
 
-Before merging the GitOps PR, replace the placeholder SOPS secret values with a
-least-privilege B2 application key for the selected public bucket, set
-`OIDC_CLIENT_SECRET`, set `SESSION_AUTH_KEY`, and set the real
-`OIDC_ALLOWED_SUBJECTS`.
+Before merging the GitOps PR, set the SOPS-managed B2 application key,
+`OIDC_CLIENT_SECRET`, `SESSION_AUTH_KEY`, and Postgres credentials. User access
+is controlled by Keycloak roles, not a ConfigMap subject list.
 
 ## Development
 
 ```bash
 go test ./...
 go build ./cmd/b2-share-broker
-go build ./cmd/b2-share-transcoder
+go build ./cmd/b2-share-processor
 ```
-
-## Follow-up
 
 Native iOS/macOS share extensions are deferred. Apple users can use the browser
 UI in v1.

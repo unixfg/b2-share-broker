@@ -31,14 +31,16 @@ var (
 )
 
 type Principal struct {
-	Subject           string `json:"sub"`
-	Email             string `json:"email,omitempty"`
-	PreferredUsername string `json:"preferred_username,omitempty"`
+	Subject           string   `json:"sub"`
+	Email             string   `json:"email,omitempty"`
+	PreferredUsername string   `json:"preferred_username,omitempty"`
+	Roles             []string `json:"roles,omitempty"`
 }
 
 type AuthenticatedRequest struct {
-	Principal Principal
-	CSRFToken string
+	Principal    Principal
+	CSRFToken    string
+	RequiresCSRF bool
 }
 
 type Authenticator interface {
@@ -54,14 +56,72 @@ func NewSessionAuthenticator(sessions *SessionManager) SessionAuthenticator {
 }
 
 func (a SessionAuthenticator) Authenticate(r *http.Request) (AuthenticatedRequest, error) {
+	if bearerToken(r) != "" {
+		return AuthenticatedRequest{}, ErrUnauthorized
+	}
 	session, err := a.sessions.Read(r)
 	if err != nil {
 		return AuthenticatedRequest{}, err
 	}
 	return AuthenticatedRequest{
-		Principal: session.Principal,
-		CSRFToken: session.CSRFToken,
+		Principal:    session.Principal,
+		CSRFToken:    session.CSRFToken,
+		RequiresCSRF: true,
 	}, nil
+}
+
+type CombinedAuthenticator struct {
+	session Authenticator
+	bearer  Authenticator
+}
+
+func NewCombinedAuthenticator(session, bearer Authenticator) CombinedAuthenticator {
+	return CombinedAuthenticator{session: session, bearer: bearer}
+}
+
+func (a CombinedAuthenticator) Authenticate(r *http.Request) (AuthenticatedRequest, error) {
+	if bearerToken(r) != "" {
+		return a.bearer.Authenticate(r)
+	}
+	return a.session.Authenticate(r)
+}
+
+type BearerAuthenticator struct {
+	verifier *oidc.IDTokenVerifier
+	roles    roleAuthorizer
+	clientID string
+}
+
+func NewBearerAuthenticator(ctx context.Context, cfg Config) (*BearerAuthenticator, error) {
+	provider, err := oidc.NewProvider(ctx, cfg.IssuerURL)
+	if err != nil {
+		return nil, err
+	}
+	return &BearerAuthenticator{
+		verifier: provider.Verifier(&oidc.Config{ClientID: cfg.OIDCAudience}),
+		roles:    newRoleAuthorizer(cfg.RequiredRoles),
+		clientID: cfg.OIDCClientID,
+	}, nil
+}
+
+func (a *BearerAuthenticator) Authenticate(r *http.Request) (AuthenticatedRequest, error) {
+	raw := bearerToken(r)
+	if raw == "" {
+		return AuthenticatedRequest{}, ErrUnauthorized
+	}
+	token, err := a.verifier.Verify(r.Context(), raw)
+	if err != nil {
+		return AuthenticatedRequest{}, ErrUnauthorized
+	}
+	var claims keycloakClaims
+	if err := token.Claims(&claims); err != nil {
+		return AuthenticatedRequest{}, ErrUnauthorized
+	}
+	principal := principalFromClaims(token.Subject, claims, a.clientID)
+	if !a.roles.Allows(claims, a.clientID) {
+		return AuthenticatedRequest{}, ErrForbidden
+	}
+	return AuthenticatedRequest{Principal: principal}, nil
 }
 
 type Session struct {
@@ -137,7 +197,7 @@ func (m *SessionManager) cookie(name, value string, maxAge int) *http.Cookie {
 
 type OIDCLogin struct {
 	clientID      string
-	allowed       map[string]struct{}
+	roles         roleAuthorizer
 	oauth2Config  oauth2.Config
 	verifier      *oidc.IDTokenVerifier
 	sessions      *SessionManager
@@ -159,19 +219,9 @@ func NewOIDCLogin(ctx context.Context, cfg Config, sessions *SessionManager) (*O
 	if err != nil {
 		return nil, err
 	}
-	allowed := make(map[string]struct{}, len(cfg.AllowedSubjects))
-	for _, subject := range cfg.AllowedSubjects {
-		subject = strings.TrimSpace(subject)
-		if subject != "" {
-			allowed[subject] = struct{}{}
-		}
-	}
-	if len(allowed) == 0 {
-		return nil, errors.New("at least one allowed OIDC subject is required")
-	}
 	return &OIDCLogin{
 		clientID: cfg.OIDCClientID,
-		allowed:  allowed,
+		roles:    newRoleAuthorizer(cfg.RequiredRoles),
 		oauth2Config: oauth2.Config{
 			ClientID:     cfg.OIDCClientID,
 			ClientSecret: cfg.OIDCClientSecret,
@@ -276,9 +326,8 @@ func (l *OIDCLogin) Complete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var claims struct {
-		Nonce             string `json:"nonce"`
-		Email             string `json:"email"`
-		PreferredUsername string `json:"preferred_username"`
+		keycloakClaims
+		Nonce string `json:"nonce"`
 	}
 	if err := idToken.Claims(&claims); err != nil {
 		writeJSONError(w, http.StatusUnauthorized, "login claims invalid")
@@ -288,15 +337,11 @@ func (l *OIDCLogin) Complete(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusUnauthorized, "login nonce invalid")
 		return
 	}
-	if _, ok := l.allowed[idToken.Subject]; !ok {
+	if !l.roles.Allows(claims.keycloakClaims, l.clientID) {
 		writeAuthError(w, ErrForbidden)
 		return
 	}
-	_, err = l.sessions.Create(w, Principal{
-		Subject:           idToken.Subject,
-		Email:             claims.Email,
-		PreferredUsername: claims.PreferredUsername,
-	})
+	_, err = l.sessions.Create(w, principalFromClaims(idToken.Subject, claims.keycloakClaims, l.clientID))
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "failed to create session")
 		return
@@ -327,11 +372,95 @@ func (l *OIDCLogin) stateCookie(value string, maxAge int) *http.Cookie {
 }
 
 func requireCSRF(authenticated AuthenticatedRequest, r *http.Request) error {
+	if !authenticated.RequiresCSRF {
+		return nil
+	}
 	token := strings.TrimSpace(r.Header.Get(csrfHeaderName))
 	if token == "" || token != authenticated.CSRFToken {
 		return ErrForbidden
 	}
 	return nil
+}
+
+type keycloakClaims struct {
+	Email             string `json:"email"`
+	PreferredUsername string `json:"preferred_username"`
+	RealmAccess       struct {
+		Roles []string `json:"roles"`
+	} `json:"realm_access"`
+	ResourceAccess map[string]struct {
+		Roles []string `json:"roles"`
+	} `json:"resource_access"`
+}
+
+type roleAuthorizer struct {
+	required map[string]struct{}
+}
+
+func newRoleAuthorizer(required []string) roleAuthorizer {
+	roles := make(map[string]struct{}, len(required))
+	for _, role := range required {
+		role = strings.TrimSpace(role)
+		if role != "" {
+			roles[role] = struct{}{}
+		}
+	}
+	return roleAuthorizer{required: roles}
+}
+
+func (a roleAuthorizer) Allows(claims keycloakClaims, clientID string) bool {
+	if len(a.required) == 0 {
+		return false
+	}
+	for _, role := range collectRoles(claims, clientID) {
+		if _, ok := a.required[role]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func principalFromClaims(subject string, claims keycloakClaims, clientID string) Principal {
+	return Principal{
+		Subject:           subject,
+		Email:             claims.Email,
+		PreferredUsername: claims.PreferredUsername,
+		Roles:             collectRoles(claims, clientID),
+	}
+}
+
+func collectRoles(claims keycloakClaims, clientID string) []string {
+	seen := map[string]bool{}
+	var roles []string
+	add := func(values []string) {
+		for _, role := range values {
+			role = strings.TrimSpace(role)
+			if role == "" || seen[role] {
+				continue
+			}
+			seen[role] = true
+			roles = append(roles, role)
+		}
+	}
+	add(claims.RealmAccess.Roles)
+	if claims.ResourceAccess != nil {
+		if resource, ok := claims.ResourceAccess[clientID]; ok {
+			add(resource.Roles)
+		}
+	}
+	return roles
+}
+
+func bearerToken(r *http.Request) string {
+	value := strings.TrimSpace(r.Header.Get("Authorization"))
+	if value == "" {
+		return ""
+	}
+	scheme, token, ok := strings.Cut(value, " ")
+	if !ok || !strings.EqualFold(scheme, "Bearer") {
+		return ""
+	}
+	return strings.TrimSpace(token)
 }
 
 func cleanReturnTo(value string) string {

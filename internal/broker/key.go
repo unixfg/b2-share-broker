@@ -2,6 +2,7 @@ package broker
 
 import (
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base32"
 	"encoding/hex"
@@ -28,9 +29,13 @@ func NormalizeSHA256(value string) (string, []byte, error) {
 	return value, sum, nil
 }
 
-func GenerateObjectKey(prefix, sha256Hex, extension string) string {
+func GenerateObjectKey(sha256Hex, extension string) string {
 	extension = normalizeExtension(extension)
-	return strings.Trim(prefix, "/") + "/" + sha256Hex + extension
+	sha256Hex = strings.ToLower(strings.TrimSpace(sha256Hex))
+	if len(sha256Hex) < 2 {
+		return sha256Hex + extension
+	}
+	return sha256Hex[:2] + "/" + sha256Hex + extension
 }
 
 func GenerateAliasSlug(key []byte, sha256Bytes []byte, extension string) string {
@@ -71,9 +76,11 @@ func NormalizeManualAlias(alias, extension string) string {
 	if cleaned == "" {
 		cleaned = "share"
 	}
-	if path.Ext(cleaned) == "" {
-		cleaned += normalizeExtension(extension)
+	finalExtension := normalizeExtension(extension)
+	if existing := path.Ext(cleaned); existing != "" {
+		cleaned = strings.TrimSuffix(cleaned, existing)
 	}
+	cleaned += finalExtension
 	if len(cleaned) > 180 {
 		ext := path.Ext(cleaned)
 		base := strings.TrimSuffix(cleaned, ext)
@@ -88,6 +95,32 @@ func NormalizeManualAlias(alias, extension string) string {
 		cleaned = "share" + normalizeExtension(extension)
 	}
 	return cleaned
+}
+
+func GenerateRandomAliasSlug(filename, extension string) (string, error) {
+	var data [8]byte
+	if _, err := rand.Read(data[:]); err != nil {
+		return "", err
+	}
+	prefix := hex.EncodeToString(data[:])
+	extension = normalizeExtension(extension)
+	name := strings.ToLower(SanitizeFilename(filename))
+	nameExt := path.Ext(name)
+	base := strings.TrimSuffix(name, nameExt)
+	base = strings.Trim(base, ".-_")
+	if base == "" {
+		base = "share"
+	}
+	if len(base) > 120 {
+		base = strings.Trim(base[:120], ".-_")
+	}
+	if base == "" {
+		base = "share"
+	}
+	if extension == "" {
+		extension = normalizeExtension(nameExt)
+	}
+	return prefix + "-" + base + extension, nil
 }
 
 func ExtensionFor(filename, contentType string) string {

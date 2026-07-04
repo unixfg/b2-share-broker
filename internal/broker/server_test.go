@@ -1,13 +1,17 @@
 package broker
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/textproto"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -28,27 +32,23 @@ func (a fakeAuth) Authenticate(*http.Request) (AuthenticatedRequest, error) {
 }
 
 type fakeStore struct {
-	presign       PresignedUpload
-	head          ObjectMetadata
-	headErr       error
-	presignedKey  string
-	presignedType string
-	objects       map[string][]byte
-	putKey        string
-	putType       string
+	headErr  error
+	objects  map[string][]byte
+	putKey   string
+	putType  string
+	deleted  []string
+	headKeys []string
 }
 
-func (s *fakeStore) PresignPutObject(_ context.Context, key, contentType string, _ int64, _ time.Duration) (PresignedUpload, error) {
-	s.presignedKey = key
-	s.presignedType = contentType
-	return s.presign, nil
-}
-
-func (s *fakeStore) HeadObject(context.Context, string) (ObjectMetadata, error) {
+func (s *fakeStore) HeadObject(_ context.Context, key string) (ObjectMetadata, error) {
+	s.headKeys = append(s.headKeys, key)
 	if s.headErr != nil {
 		return ObjectMetadata{}, s.headErr
 	}
-	return s.head, nil
+	if body, ok := s.objects[key]; ok {
+		return ObjectMetadata{ContentLength: int64(len(body))}, nil
+	}
+	return ObjectMetadata{}, nil
 }
 
 func (s *fakeStore) DownloadObject(_ context.Context, key string, writer io.Writer) error {
@@ -77,12 +77,21 @@ func (s *fakeStore) PutObject(_ context.Context, key, contentType string, size i
 	return ObjectMetadata{ContentLength: size, ContentType: contentType, ETag: "put-etag"}, nil
 }
 
+func (s *fakeStore) DeleteObject(_ context.Context, key string) error {
+	s.deleted = append(s.deleted, key)
+	if s.objects != nil {
+		delete(s.objects, key)
+	}
+	return nil
+}
+
 type memoryMetadata struct {
 	objects     map[string]StoredObject
 	aliases     map[string]ShareAlias
 	history     []ShareAlias
 	jobs        map[string]ProcessingJob
 	derivatives map[string]ObjectDerivative
+	unavailable []string
 }
 
 func newMemoryMetadata() *memoryMetadata {
@@ -105,36 +114,29 @@ func (m *memoryMetadata) GetDerivedObject(_ context.Context, sourceSHA256, profi
 		return StoredObject{}, false, nil
 	}
 	object, ok := m.objects[derivative.TargetSHA256]
-	return object, ok, nil
+	if !ok || object.Status != "ready" {
+		return StoredObject{}, false, nil
+	}
+	return object, true, nil
 }
 
-func (m *memoryMetadata) UpsertObjectAndAlias(_ context.Context, object StoredObject, alias ShareAlias) error {
-	if object.CreatedAt.IsZero() {
-		object.CreatedAt = time.Date(2026, 6, 28, 12, 0, 0, 0, time.UTC)
+func (m *memoryMetadata) MarkObjectUnavailable(_ context.Context, sha256, status string) error {
+	object, ok := m.objects[sha256]
+	if !ok {
+		return nil
 	}
-	m.objects[object.SHA256] = object
-	return m.UpsertAlias(context.Background(), alias)
+	if status == "" {
+		status = "missing"
+	}
+	object.Status = status
+	object.DeletedAt = time.Date(2026, 6, 28, 12, 9, 0, 0, time.UTC)
+	m.objects[sha256] = object
+	m.unavailable = append(m.unavailable, sha256)
+	return nil
 }
 
 func (m *memoryMetadata) UpsertAlias(_ context.Context, alias ShareAlias) error {
-	if previous, ok := m.aliases[alias.Slug]; ok {
-		if previous.ObjectSHA256 != alias.ObjectSHA256 {
-			m.history = append(m.history, previous)
-		}
-		alias.CreatedAt = previous.CreatedAt
-		alias.RedirectCount = previous.RedirectCount
-		alias.LastRedirectedAt = previous.LastRedirectedAt
-	}
-	object := m.objects[alias.ObjectSHA256]
-	alias.ObjectKey = object.ObjectKey
-	alias.Size = object.Size
-	alias.ContentType = object.ContentType
-	if alias.CreatedAt.IsZero() {
-		alias.CreatedAt = time.Date(2026, 6, 28, 12, 0, 0, 0, time.UTC)
-	}
-	alias.UpdatedAt = alias.CreatedAt
-	m.aliases[alias.Slug] = alias
-	return nil
+	return m.upsertAlias(alias)
 }
 
 func (m *memoryMetadata) GetAlias(_ context.Context, slug string) (ShareAlias, bool, error) {
@@ -163,45 +165,59 @@ func (m *memoryMetadata) ListAliases(_ context.Context, owner string, _ int) ([]
 	return aliases, nil
 }
 
-func (m *memoryMetadata) DeleteAlias(_ context.Context, slug, owner string) (bool, error) {
+func (m *memoryMetadata) DeleteAlias(_ context.Context, slug, owner string) (DeletedShare, bool, error) {
 	alias, ok := m.aliases[slug]
 	if !ok || alias.Owner != owner || alias.Visibility == "deleted" {
-		return false, nil
+		return DeletedShare{}, false, nil
 	}
 	alias.Visibility = "deleted"
 	alias.UpdatedAt = time.Date(2026, 6, 28, 12, 2, 0, 0, time.UTC)
 	m.aliases[slug] = alias
-	return true, nil
-}
 
-func (m *memoryMetadata) CreateProcessingJob(_ context.Context, id, slug, owner, profile string) (ProcessingJob, bool, error) {
-	alias, ok := m.aliases[slug]
-	if !ok || alias.Owner != owner || alias.Visibility != "public" {
-		return ProcessingJob{}, false, nil
-	}
-	for _, job := range m.jobs {
-		if job.Owner == owner && job.AliasSlug == slug && job.SourceSHA256 == alias.ObjectSHA256 && job.Profile == profile &&
-			(job.Status == ProcessingStatusQueued || job.Status == ProcessingStatusRunning) {
-			return job, true, nil
+	deleted := DeletedShare{Alias: alias}
+	for id, job := range m.jobs {
+		if job.AliasSlug != slug || job.Owner != owner {
+			continue
+		}
+		if job.Status == ProcessingStatusQueued || job.Status == ProcessingStatusRunning {
+			job.Status = ProcessingStatusCanceled
+			job.Error = "share deleted"
+			m.jobs[id] = job
+			if job.StagingPath != "" {
+				deleted.StagingPaths = append(deleted.StagingPaths, job.StagingPath)
+			}
 		}
 	}
-	object := m.objects[alias.ObjectSHA256]
-	job := ProcessingJob{
-		ID:              id,
-		Owner:           owner,
-		AliasSlug:       slug,
-		SourceSHA256:    alias.ObjectSHA256,
-		SourceObjectKey: object.ObjectKey,
-		Profile:         profile,
-		Status:          ProcessingStatusQueued,
-		CreatedAt:       time.Date(2026, 6, 28, 12, 3, 0, 0, time.UTC),
-		UpdatedAt:       time.Date(2026, 6, 28, 12, 3, 0, 0, time.UTC),
-		DisplayFilename: alias.DisplayFilename,
-		SourceSize:      object.Size,
-		SourceType:      object.ContentType,
+	if alias.ObjectSHA256 != "" && alias.ObjectKey != "" {
+		references := 0
+		for _, other := range m.aliases {
+			if other.ObjectSHA256 == alias.ObjectSHA256 && other.Visibility != "deleted" {
+				references++
+			}
+		}
+		if references == 0 {
+			object := m.objects[alias.ObjectSHA256]
+			object.Status = "deleted"
+			object.DeletedAt = time.Date(2026, 6, 28, 12, 2, 0, 0, time.UTC)
+			m.objects[alias.ObjectSHA256] = object
+			deleted.ObjectKey = alias.ObjectKey
+		}
 	}
-	m.jobs[id] = job
-	return job, true, nil
+	return deleted, true, nil
+}
+
+func (m *memoryMetadata) CreateIngestJob(_ context.Context, job ProcessingJob, alias ShareAlias) (ProcessingJob, error) {
+	alias.Status = AliasStatusPending
+	alias.Visibility = "public"
+	if err := m.upsertAlias(alias); err != nil {
+		return ProcessingJob{}, err
+	}
+	now := time.Date(2026, 6, 28, 12, 3, 0, 0, time.UTC)
+	job.Status = ProcessingStatusQueued
+	job.CreatedAt = now
+	job.UpdatedAt = now
+	m.jobs[job.ID] = job
+	return job, nil
 }
 
 func (m *memoryMetadata) GetProcessingJob(_ context.Context, id, owner string) (ProcessingJob, bool, error) {
@@ -231,8 +247,11 @@ func (m *memoryMetadata) CompleteProcessingJob(_ context.Context, id string, obj
 	if !ok || job.Status != ProcessingStatusRunning {
 		return errors.New("running job not found")
 	}
+	if object.Status == "" {
+		object.Status = "ready"
+	}
 	m.objects[object.SHA256] = object
-	if err := m.UpsertAlias(context.Background(), alias); err != nil {
+	if err := m.upsertAlias(alias); err != nil {
 		return err
 	}
 	job.Status = ProcessingStatusCompleted
@@ -241,12 +260,14 @@ func (m *memoryMetadata) CompleteProcessingJob(_ context.Context, id string, obj
 	job.CompletedAt = time.Date(2026, 6, 28, 12, 5, 0, 0, time.UTC)
 	job.UpdatedAt = job.CompletedAt
 	m.jobs[id] = job
-	m.derivatives[job.SourceSHA256+"|"+job.Profile] = ObjectDerivative{
-		SourceSHA256: job.SourceSHA256,
-		TargetSHA256: object.SHA256,
-		Profile:      job.Profile,
-		JobID:        id,
-		CreatedAt:    job.CompletedAt,
+	if job.SourceSHA256 != "" {
+		m.derivatives[job.SourceSHA256+"|"+job.Profile] = ObjectDerivative{
+			SourceSHA256: job.SourceSHA256,
+			TargetSHA256: object.SHA256,
+			Profile:      job.Profile,
+			JobID:        id,
+			CreatedAt:    job.CompletedAt,
+		}
 	}
 	return nil
 }
@@ -261,29 +282,70 @@ func (m *memoryMetadata) FailProcessingJob(_ context.Context, id, message string
 	job.CompletedAt = time.Date(2026, 6, 28, 12, 5, 0, 0, time.UTC)
 	job.UpdatedAt = job.CompletedAt
 	m.jobs[id] = job
+	if alias, ok := m.aliases[job.AliasSlug]; ok && alias.Visibility != "deleted" {
+		alias.Status = AliasStatusFailed
+		alias.Error = message
+		m.aliases[job.AliasSlug] = alias
+	}
 	return nil
 }
 
-func testConfig() Config {
+func (m *memoryMetadata) upsertAlias(alias ShareAlias) error {
+	if previous, ok := m.aliases[alias.Slug]; ok {
+		if previous.ObjectSHA256 != "" && alias.ObjectSHA256 != "" && previous.ObjectSHA256 != alias.ObjectSHA256 {
+			m.history = append(m.history, previous)
+		}
+		alias.CreatedAt = previous.CreatedAt
+		alias.RedirectCount = previous.RedirectCount
+		alias.LastRedirectedAt = previous.LastRedirectedAt
+	}
+	if alias.Visibility == "" {
+		alias.Visibility = "public"
+	}
+	if alias.Status == "" {
+		if alias.ObjectSHA256 == "" {
+			alias.Status = AliasStatusPending
+		} else {
+			alias.Status = AliasStatusReady
+		}
+	}
+	if object, ok := m.objects[alias.ObjectSHA256]; ok {
+		alias.ObjectKey = object.ObjectKey
+		alias.Size = object.Size
+		alias.ContentType = object.ContentType
+	}
+	if alias.CreatedAt.IsZero() {
+		alias.CreatedAt = time.Date(2026, 6, 28, 12, 0, 0, 0, time.UTC)
+	}
+	alias.UpdatedAt = time.Date(2026, 6, 28, 12, 6, 0, 0, time.UTC)
+	m.aliases[alias.Slug] = alias
+	return nil
+}
+
+func testConfig(t *testing.T) Config {
+	t.Helper()
 	return Config{
 		B2PublicBaseURL: "https://bucket.s3.us-west-004.backblazeb2.com",
 		PublicBaseURL:   "https://share.doesthings.online",
-		ObjectPrefix:    "s",
 		MaxUploadBytes:  1024,
-		PresignTTL:      15 * time.Minute,
-		UploadTokenTTL:  time.Hour,
-		UploadTokenKey:  []byte("01234567890123456789012345678901"),
-		AliasHMACKey:    []byte("alias-key-012345678901234567890123"),
 		SessionTTL:      12 * time.Hour,
 		SessionAuthKey:  []byte("abcdefghijklmnopqrstuvwxyz012345"),
+		StagingDir:      t.TempDir(),
 		Clock:           func() time.Time { return time.Date(2026, 6, 28, 12, 0, 0, 0, time.UTC) },
 	}
 }
 
 func authenticatedFakeAuth(subject string) fakeAuth {
 	return fakeAuth{authenticated: AuthenticatedRequest{
+		Principal:    Principal{Subject: subject},
+		CSRFToken:    "csrf-token",
+		RequiresCSRF: true,
+	}}
+}
+
+func bearerFakeAuth(subject string) fakeAuth {
+	return fakeAuth{authenticated: AuthenticatedRequest{
 		Principal: Principal{Subject: subject},
-		CSRFToken: "csrf-token",
 	}}
 }
 
@@ -291,17 +353,41 @@ func setCSRF(request *http.Request) {
 	request.Header.Set(csrfHeaderName, "csrf-token")
 }
 
-func expectedSlug(t *testing.T, cfg Config, extension string) string {
+func multipartUpload(t *testing.T, fieldName, filename, contentType string, body []byte, alias string) (*bytes.Buffer, string) {
 	t.Helper()
-	_, bytes, err := NormalizeSHA256(testSHA256)
+	var buffer bytes.Buffer
+	writer := multipart.NewWriter(&buffer)
+	part, err := writer.CreatePart(textprotoMIMEHeader(map[string]string{
+		"Content-Disposition": `form-data; name="` + fieldName + `"; filename="` + filename + `"`,
+		"Content-Type":        contentType,
+	}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	return GenerateAliasSlug(cfg.AliasHMACKey, bytes, extension)
+	if _, err := part.Write(body); err != nil {
+		t.Fatal(err)
+	}
+	if alias != "" {
+		if err := writer.WriteField("alias", alias); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return &buffer, writer.FormDataContentType()
+}
+
+func textprotoMIMEHeader(values map[string]string) textproto.MIMEHeader {
+	header := textproto.MIMEHeader{}
+	for key, value := range values {
+		header.Set(key, value)
+	}
+	return header
 }
 
 func TestHealthzIsUnauthenticated(t *testing.T) {
-	server := NewServer(testConfig(), fakeAuth{err: ErrUnauthorized}, &fakeStore{}, newMemoryMetadata(), slog.Default())
+	server := NewServer(testConfig(t), fakeAuth{err: ErrUnauthorized}, &fakeStore{}, newMemoryMetadata(), slog.Default())
 	request := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	recorder := httptest.NewRecorder()
 
@@ -315,396 +401,99 @@ func TestHealthzIsUnauthenticated(t *testing.T) {
 	}
 }
 
-func TestCreateUploadUsesContentAddressedObjectAndAlias(t *testing.T) {
-	cfg := testConfig()
-	store := &fakeStore{presign: PresignedUpload{
-		URL:    "https://upload.example.test/presigned",
-		Header: http.Header{"Content-Type": []string{"image/png"}, "Host": []string{"ignored"}},
-	}}
-	server := NewServer(cfg, authenticatedFakeAuth("user-1"), store, newMemoryMetadata(), slog.Default())
-	body := `{"filename":"Screenshot 1.png","contentType":"image/png","size":42,"sha256":"` + testSHA256 + `"}`
-	request := httptest.NewRequest(http.MethodPost, "/api/uploads", strings.NewReader(body))
-	setCSRF(request)
-	recorder := httptest.NewRecorder()
-
-	server.ServeHTTP(recorder, request)
-
-	if recorder.Code != http.StatusCreated {
-		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
-	}
-	var response createUploadResponse
-	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
-		t.Fatal(err)
-	}
-	if response.UploadURL != "https://upload.example.test/presigned" {
-		t.Fatalf("upload URL = %q", response.UploadURL)
-	}
-	if response.RequiredHeaders["Content-Type"] != "image/png" {
-		t.Fatalf("required headers = %#v", response.RequiredHeaders)
-	}
-	if response.ObjectKey != "s/"+testSHA256+".png" || store.presignedKey != response.ObjectKey {
-		t.Fatalf("object key = %q, presigned = %q", response.ObjectKey, store.presignedKey)
-	}
-	wantPublic := "https://share.doesthings.online/s/" + expectedSlug(t, cfg, ".png")
-	if response.PublicURL != wantPublic {
-		t.Fatalf("public URL = %q, want %q", response.PublicURL, wantPublic)
-	}
-	if response.B2URL != "https://bucket.s3.us-west-004.backblazeb2.com/s/"+testSHA256+".png" {
-		t.Fatalf("b2 URL = %q", response.B2URL)
-	}
-	if response.UploadToken == "" || response.AlreadyUploaded {
-		t.Fatalf("response = %#v", response)
-	}
-}
-
-func TestCreateUploadReturnsAliasOnlyWhenObjectExists(t *testing.T) {
-	cfg := testConfig()
+func TestCreateUploadStagesMultipartAndQueuesShare(t *testing.T) {
+	cfg := testConfig(t)
 	metadata := newMemoryMetadata()
-	metadata.objects[testSHA256] = StoredObject{
-		SHA256:      testSHA256,
-		ObjectKey:   "s/" + testSHA256 + ".png",
-		Size:        42,
-		ContentType: "image/png",
-		Extension:   ".png",
-		Uploader:    "user-1",
-	}
-	store := &fakeStore{}
-	server := NewServer(cfg, authenticatedFakeAuth("user-1"), store, metadata, slog.Default())
-	body := `{"filename":"again.png","contentType":"image/png","size":42,"sha256":"` + testSHA256 + `"}`
-	request := httptest.NewRequest(http.MethodPost, "/api/uploads", strings.NewReader(body))
-	setCSRF(request)
-	recorder := httptest.NewRecorder()
-
-	server.ServeHTTP(recorder, request)
-
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
-	}
-	var response createUploadResponse
-	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
-		t.Fatal(err)
-	}
-	if !response.AlreadyUploaded || response.UploadURL != "" || response.UploadToken != "" || store.presignedKey != "" {
-		t.Fatalf("response = %#v, presigned = %q", response, store.presignedKey)
-	}
-	if _, ok := metadata.aliases[expectedSlug(t, cfg, ".png")]; !ok {
-		t.Fatalf("expected alias to be recorded: %#v", metadata.aliases)
-	}
-}
-
-func TestCreateUploadUsesFastStartDerivativeWhenSourceExists(t *testing.T) {
-	cfg := testConfig()
-	targetSHA := strings.Repeat("b", 64)
-	metadata := newMemoryMetadata()
-	metadata.objects[testSHA256] = StoredObject{
-		SHA256:      testSHA256,
-		ObjectKey:   "s/" + testSHA256 + ".mp4",
-		Size:        42,
-		ContentType: "video/mp4",
-		Extension:   ".mp4",
-		Uploader:    "user-1",
-	}
-	metadata.objects[targetSHA] = StoredObject{
-		SHA256:      targetSHA,
-		ObjectKey:   "s/" + targetSHA + ".mp4",
-		Size:        40,
-		ContentType: "video/mp4",
-		Extension:   ".mp4",
-		Uploader:    "user-1",
-	}
-	metadata.derivatives[testSHA256+"|"+ProcessingProfileMP4FaststartRemux] = ObjectDerivative{
-		SourceSHA256: testSHA256,
-		TargetSHA256: targetSHA,
-		Profile:      ProcessingProfileMP4FaststartRemux,
-		JobID:        "job-1",
-	}
-	store := &fakeStore{}
-	server := NewServer(cfg, authenticatedFakeAuth("user-1"), store, metadata, slog.Default())
-	body := `{"filename":"again.mp4","contentType":"video/mp4","size":42,"sha256":"` + testSHA256 + `"}`
-	request := httptest.NewRequest(http.MethodPost, "/api/uploads", strings.NewReader(body))
-	setCSRF(request)
-	recorder := httptest.NewRecorder()
-
-	server.ServeHTTP(recorder, request)
-
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
-	}
-	var response createUploadResponse
-	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
-		t.Fatal(err)
-	}
-	if !response.AlreadyUploaded || response.UploadURL != "" || response.UploadToken != "" || store.presignedKey != "" {
-		t.Fatalf("response = %#v, presigned = %q", response, store.presignedKey)
-	}
-	if response.ObjectKey != "s/"+targetSHA+".mp4" || response.B2URL != "https://bucket.s3.us-west-004.backblazeb2.com/s/"+targetSHA+".mp4" {
-		t.Fatalf("response = %#v", response)
-	}
-	if response.SourceSHA256 != testSHA256 || response.ServedSHA256 != targetSHA || response.ProcessingProfile != ProcessingProfileMP4FaststartRemux {
-		t.Fatalf("response = %#v", response)
-	}
-	slug := expectedSlug(t, cfg, ".mp4")
-	if metadata.aliases[slug].ObjectSHA256 != targetSHA {
-		t.Fatalf("alias = %#v", metadata.aliases[slug])
-	}
-}
-
-func TestCreateUploadAllowsManualAliasRepoint(t *testing.T) {
-	cfg := testConfig()
-	metadata := newMemoryMetadata()
-	metadata.objects[testSHA256] = StoredObject{SHA256: testSHA256, ObjectKey: "s/" + testSHA256 + ".png", Size: 42, ContentType: "image/png", Extension: ".png"}
-	metadata.aliases["latest.png"] = ShareAlias{Slug: "latest.png", ObjectSHA256: strings.Repeat("a", 64), Owner: "user-1"}
 	server := NewServer(cfg, authenticatedFakeAuth("user-1"), &fakeStore{}, metadata, slog.Default())
-	body := `{"filename":"again.png","contentType":"image/png","size":42,"sha256":"` + testSHA256 + `","alias":"latest"}`
-	request := httptest.NewRequest(http.MethodPost, "/api/uploads", strings.NewReader(body))
+	body, contentType := multipartUpload(t, "file", "Screenshot 1.png", "image/png", []byte("png data"), "")
+	request := httptest.NewRequest(http.MethodPost, "/api/uploads", body)
+	request.Header.Set("Content-Type", contentType)
 	setCSRF(request)
 	recorder := httptest.NewRecorder()
 
 	server.ServeHTTP(recorder, request)
 
-	if recorder.Code != http.StatusOK {
+	if recorder.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
 	}
-	if metadata.aliases["latest.png"].ObjectSHA256 != testSHA256 {
-		t.Fatalf("alias was not repointed: %#v", metadata.aliases["latest.png"])
+	var response createUploadResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
 	}
-	if len(metadata.history) != 1 {
-		t.Fatalf("history = %#v", metadata.history)
+	if response.ShareURL != "https://share.doesthings.online/s/"+response.Slug || !strings.HasSuffix(response.Slug, "-screenshot_1.png") {
+		t.Fatalf("response = %#v", response)
 	}
-}
-
-func TestCreateUploadRevivesDeletedAliasAndPreservesRedirectStats(t *testing.T) {
-	cfg := testConfig()
-	slug := expectedSlug(t, cfg, ".txt")
-	lastRedirected := time.Date(2026, 6, 28, 12, 1, 0, 0, time.UTC)
-	metadata := newMemoryMetadata()
-	metadata.objects[testSHA256] = StoredObject{
-		SHA256:      testSHA256,
-		ObjectKey:   "s/" + testSHA256 + ".txt",
-		Size:        42,
-		ContentType: "text/plain",
-		Extension:   ".txt",
-		Uploader:    "user-1",
+	job := metadata.jobs[response.JobID]
+	if job.Status != ProcessingStatusQueued || job.Profile != ProcessingProfileUploadFinalize || job.Owner != "user-1" {
+		t.Fatalf("job = %#v", job)
 	}
-	metadata.aliases[slug] = ShareAlias{
-		Slug:             slug,
-		ObjectSHA256:     testSHA256,
-		ObjectKey:        "s/" + testSHA256 + ".txt",
-		Owner:            "user-1",
-		DisplayFilename:  "old.txt",
-		Visibility:       "deleted",
-		RedirectCount:    7,
-		LastRedirectedAt: lastRedirected,
-		CreatedAt:        time.Date(2026, 6, 28, 11, 0, 0, 0, time.UTC),
+	staged, err := os.ReadFile(job.StagingPath)
+	if err != nil {
+		t.Fatal(err)
 	}
-	server := NewServer(cfg, authenticatedFakeAuth("user-1"), &fakeStore{}, metadata, slog.Default())
-	body := `{"filename":"new.txt","contentType":"text/plain","size":42,"sha256":"` + testSHA256 + `"}`
-	request := httptest.NewRequest(http.MethodPost, "/api/uploads", strings.NewReader(body))
-	setCSRF(request)
-	recorder := httptest.NewRecorder()
-
-	server.ServeHTTP(recorder, request)
-
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	if string(staged) != "png data" {
+		t.Fatalf("staged = %q", staged)
 	}
-	alias := metadata.aliases[slug]
-	if alias.Visibility != "public" || alias.DisplayFilename != "new.txt" {
+	alias := metadata.aliases[response.Slug]
+	if alias.Status != AliasStatusPending || alias.ObjectSHA256 != "" {
 		t.Fatalf("alias = %#v", alias)
 	}
-	if alias.RedirectCount != 7 || !alias.LastRedirectedAt.Equal(lastRedirected) {
-		t.Fatalf("redirect stats were reset: %#v", alias)
-	}
 }
 
-func TestCreateUploadRejectsUnauthenticated(t *testing.T) {
-	server := NewServer(testConfig(), fakeAuth{err: ErrUnauthorized}, &fakeStore{}, newMemoryMetadata(), slog.Default())
-	request := httptest.NewRequest(http.MethodPost, "/api/uploads", strings.NewReader(`{"filename":"a.txt","size":1}`))
-	recorder := httptest.NewRecorder()
-
-	server.ServeHTTP(recorder, request)
-
-	if recorder.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusUnauthorized)
-	}
-}
-
-func TestCreateUploadRejectsMissingCSRFToken(t *testing.T) {
-	server := NewServer(testConfig(), authenticatedFakeAuth("user-1"), &fakeStore{}, newMemoryMetadata(), slog.Default())
-	request := httptest.NewRequest(http.MethodPost, "/api/uploads", strings.NewReader(`{"filename":"a.txt","size":1}`))
-	recorder := httptest.NewRecorder()
-
-	server.ServeHTTP(recorder, request)
-
-	if recorder.Code != http.StatusForbidden {
-		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusForbidden)
-	}
-}
-
-func TestCreateUploadRejectsInvalidSHA256(t *testing.T) {
-	server := NewServer(testConfig(), authenticatedFakeAuth("user-1"), &fakeStore{}, newMemoryMetadata(), slog.Default())
-	request := httptest.NewRequest(http.MethodPost, "/api/uploads", strings.NewReader(`{"filename":"a.bin","size":1,"sha256":"nope"}`))
-	setCSRF(request)
-	recorder := httptest.NewRecorder()
-
-	server.ServeHTTP(recorder, request)
-
-	if recorder.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusBadRequest)
-	}
-}
-
-func TestCreateUploadRejectsOversizedFile(t *testing.T) {
-	server := NewServer(testConfig(), authenticatedFakeAuth("user-1"), &fakeStore{}, newMemoryMetadata(), slog.Default())
-	request := httptest.NewRequest(http.MethodPost, "/api/uploads", strings.NewReader(`{"filename":"a.bin","size":2048,"sha256":"`+testSHA256+`"}`))
-	setCSRF(request)
-	recorder := httptest.NewRecorder()
-
-	server.ServeHTTP(recorder, request)
-
-	if recorder.Code != http.StatusRequestEntityTooLarge {
-		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusRequestEntityTooLarge)
-	}
-}
-
-func TestCompleteUploadReturnsVerifiedMetadata(t *testing.T) {
-	cfg := testConfig()
-	slug := expectedSlug(t, cfg, ".txt")
-	token, err := SignUploadToken(cfg.UploadTokenKey, uploadTokenPayload{
-		ObjectKey:       "s/" + testSHA256 + ".txt",
-		SHA256:          testSHA256,
-		AliasSlug:       slug,
-		DisplayFilename: "a.txt",
-		ContentType:     "text/plain",
-		Extension:       ".txt",
-		Size:            12,
-		Subject:         "user-1",
-		ExpiresAt:       cfg.Clock().Add(time.Hour).Unix(),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+func TestCreateUploadVideoQueuesMP4Normalization(t *testing.T) {
+	cfg := testConfig(t)
 	metadata := newMemoryMetadata()
-	server := NewServer(
-		cfg,
-		authenticatedFakeAuth("user-1"),
-		&fakeStore{head: ObjectMetadata{ContentLength: 12, ContentType: "text/plain", ETag: "abc123"}},
-		metadata,
-		slog.Default(),
-	)
-	request := httptest.NewRequest(http.MethodPost, "/api/uploads/complete", strings.NewReader(`{"uploadToken":"`+token+`"}`))
+	server := NewServer(cfg, authenticatedFakeAuth("user-1"), &fakeStore{}, metadata, slog.Default())
+	body, contentType := multipartUpload(t, "file", "Clip.mov", "video/quicktime", []byte("mov data"), "demo.mov")
+	request := httptest.NewRequest(http.MethodPost, "/api/uploads", body)
+	request.Header.Set("Content-Type", contentType)
 	setCSRF(request)
 	recorder := httptest.NewRecorder()
 
 	server.ServeHTTP(recorder, request)
 
-	if recorder.Code != http.StatusOK {
+	if recorder.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
 	}
-	var response completeUploadResponse
+	var response createUploadResponse
 	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
 		t.Fatal(err)
 	}
-	if !response.Verified || response.Size != 12 || response.ETag != "abc123" || response.SHA256 != testSHA256 {
-		t.Fatalf("response = %#v", response)
+	if response.Slug != "demo.mp4" {
+		t.Fatalf("slug = %q", response.Slug)
 	}
-	if response.PublicURL != "https://share.doesthings.online/s/"+slug {
-		t.Fatalf("public URL = %q", response.PublicURL)
-	}
-	if _, ok := metadata.objects[testSHA256]; !ok {
-		t.Fatalf("object was not recorded")
-	}
-	if _, ok := metadata.aliases[slug]; !ok {
-		t.Fatalf("alias was not recorded")
+	job := metadata.jobs[response.JobID]
+	if job.Profile != ProcessingProfileMP4Web || job.SourceType != "video/quicktime" {
+		t.Fatalf("job = %#v", job)
 	}
 }
 
-func TestCompleteUploadRequiresHeadVerification(t *testing.T) {
-	cfg := testConfig()
-	token, err := SignUploadToken(cfg.UploadTokenKey, uploadTokenPayload{
-		ObjectKey: "s/" + testSHA256 + ".txt",
-		SHA256:    testSHA256,
-		AliasSlug: expectedSlug(t, cfg, ".txt"),
-		Size:      12,
-		Subject:   "user-1",
-		ExpiresAt: cfg.Clock().Add(time.Hour).Unix(),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	server := NewServer(
-		cfg,
-		authenticatedFakeAuth("user-1"),
-		&fakeStore{headErr: errors.New("transient")},
-		newMemoryMetadata(),
-		slog.Default(),
-	)
-	request := httptest.NewRequest(http.MethodPost, "/api/uploads/complete", strings.NewReader(`{"uploadToken":"`+token+`"}`))
-	setCSRF(request)
+func TestCreateUploadRequiresCSRFForSessionButNotBearer(t *testing.T) {
+	cfg := testConfig(t)
+	body, contentType := multipartUpload(t, "file", "a.txt", "text/plain", []byte("hello"), "")
+	request := httptest.NewRequest(http.MethodPost, "/api/uploads", body)
+	request.Header.Set("Content-Type", contentType)
 	recorder := httptest.NewRecorder()
+	NewServer(cfg, authenticatedFakeAuth("user-1"), &fakeStore{}, newMemoryMetadata(), slog.Default()).ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("session status = %d, want %d", recorder.Code, http.StatusForbidden)
+	}
 
-	server.ServeHTTP(recorder, request)
-
-	if recorder.Code != http.StatusBadGateway {
-		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	body, contentType = multipartUpload(t, "file", "a.txt", "text/plain", []byte("hello"), "")
+	request = httptest.NewRequest(http.MethodPost, "/api/uploads", body)
+	request.Header.Set("Content-Type", contentType)
+	recorder = httptest.NewRecorder()
+	NewServer(cfg, bearerFakeAuth("user-1"), &fakeStore{}, newMemoryMetadata(), slog.Default()).ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("bearer status = %d, body = %s", recorder.Code, recorder.Body.String())
 	}
 }
 
-func TestPublicShareRedirectsToNativeB2URL(t *testing.T) {
+func TestGetUploadStatusRequiresOwner(t *testing.T) {
 	metadata := newMemoryMetadata()
-	metadata.objects[testSHA256] = StoredObject{SHA256: testSHA256, ObjectKey: "s/" + testSHA256 + ".txt", Size: 12, ContentType: "text/plain"}
-	metadata.aliases["public.txt"] = ShareAlias{Slug: "public.txt", ObjectSHA256: testSHA256, ObjectKey: "s/" + testSHA256 + ".txt", Visibility: "public"}
-	server := NewServer(testConfig(), fakeAuth{err: ErrUnauthorized}, &fakeStore{}, metadata, slog.Default())
-	request := httptest.NewRequest(http.MethodGet, "/s/public.txt", nil)
-	recorder := httptest.NewRecorder()
-
-	server.ServeHTTP(recorder, request)
-
-	if recorder.Code != http.StatusFound {
-		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
-	}
-	want := "https://bucket.s3.us-west-004.backblazeb2.com/s/" + testSHA256 + ".txt"
-	if got := recorder.Header().Get("Location"); got != want {
-		t.Fatalf("location = %q, want %q", got, want)
-	}
-	if metadata.aliases["public.txt"].RedirectCount != 1 {
-		t.Fatalf("redirect count = %d", metadata.aliases["public.txt"].RedirectCount)
-	}
-}
-
-func TestPublicShareHeadRedirectsToNativeB2URL(t *testing.T) {
-	metadata := newMemoryMetadata()
-	metadata.objects[testSHA256] = StoredObject{SHA256: testSHA256, ObjectKey: "s/" + testSHA256 + ".txt", Size: 12, ContentType: "text/plain"}
-	metadata.aliases["public.txt"] = ShareAlias{Slug: "public.txt", ObjectSHA256: testSHA256, ObjectKey: "s/" + testSHA256 + ".txt", Visibility: "public"}
-	server := NewServer(testConfig(), fakeAuth{err: ErrUnauthorized}, &fakeStore{}, metadata, slog.Default())
-	request := httptest.NewRequest(http.MethodHead, "/s/public.txt", nil)
-	recorder := httptest.NewRecorder()
-
-	server.ServeHTTP(recorder, request)
-
-	if recorder.Code != http.StatusFound {
-		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
-	}
-}
-
-func TestPublicShareRejectsUnknownOrNestedAliases(t *testing.T) {
-	server := NewServer(testConfig(), fakeAuth{err: ErrUnauthorized}, &fakeStore{}, newMemoryMetadata(), slog.Default())
-	for _, path := range []string{"/s/missing.txt", "/s/nested/path.txt"} {
-		request := httptest.NewRequest(http.MethodGet, path, nil)
-		recorder := httptest.NewRecorder()
-		server.ServeHTTP(recorder, request)
-		if recorder.Code != http.StatusNotFound {
-			t.Fatalf("%s status = %d, want %d", path, recorder.Code, http.StatusNotFound)
-		}
-	}
-}
-
-func TestPublicShareRejectsDeletedAlias(t *testing.T) {
-	metadata := newMemoryMetadata()
-	metadata.objects[testSHA256] = StoredObject{SHA256: testSHA256, ObjectKey: "s/" + testSHA256 + ".txt", Size: 12, ContentType: "text/plain"}
-	metadata.aliases["deleted.txt"] = ShareAlias{Slug: "deleted.txt", ObjectSHA256: testSHA256, ObjectKey: "s/" + testSHA256 + ".txt", Visibility: "deleted"}
-	server := NewServer(testConfig(), fakeAuth{err: ErrUnauthorized}, &fakeStore{}, metadata, slog.Default())
-	request := httptest.NewRequest(http.MethodGet, "/s/deleted.txt", nil)
+	metadata.jobs["job-1"] = ProcessingJob{ID: "job-1", Owner: "user-2", AliasSlug: "share.txt", Profile: ProcessingProfileUploadFinalize, Status: ProcessingStatusQueued}
+	server := NewServer(testConfig(t), authenticatedFakeAuth("user-1"), &fakeStore{}, metadata, slog.Default())
+	request := httptest.NewRequest(http.MethodGet, "/api/uploads/job-1", nil)
 	recorder := httptest.NewRecorder()
 
 	server.ServeHTTP(recorder, request)
@@ -714,13 +503,47 @@ func TestPublicShareRejectsDeletedAlias(t *testing.T) {
 	}
 }
 
-func TestListSharesReturnsAuthenticatedUserHistory(t *testing.T) {
+func TestPublicShareStatesAndRedirect(t *testing.T) {
+	cfg := testConfig(t)
 	metadata := newMemoryMetadata()
-	metadata.objects[testSHA256] = StoredObject{SHA256: testSHA256, ObjectKey: "s/" + testSHA256 + ".txt", Size: 12, ContentType: "text/plain"}
-	metadata.aliases["mine.txt"] = ShareAlias{Slug: "mine.txt", ObjectSHA256: testSHA256, ObjectKey: "s/" + testSHA256 + ".txt", Owner: "user-1", DisplayFilename: "mine.txt", Visibility: "public"}
-	metadata.aliases["other.txt"] = ShareAlias{Slug: "other.txt", ObjectSHA256: testSHA256, ObjectKey: "s/" + testSHA256 + ".txt", Owner: "user-2", Visibility: "public"}
-	metadata.aliases["deleted.txt"] = ShareAlias{Slug: "deleted.txt", ObjectSHA256: testSHA256, ObjectKey: "s/" + testSHA256 + ".txt", Owner: "user-1", Visibility: "deleted"}
-	server := NewServer(testConfig(), authenticatedFakeAuth("user-1"), &fakeStore{}, metadata, slog.Default())
+	key := "01/" + testSHA256 + ".txt"
+	metadata.objects[testSHA256] = StoredObject{SHA256: testSHA256, ObjectKey: key, Size: 12, ContentType: "text/plain", Status: "ready"}
+	metadata.aliases["pending.txt"] = ShareAlias{Slug: "pending.txt", Owner: "user-1", Visibility: "public", Status: AliasStatusPending}
+	metadata.aliases["failed.txt"] = ShareAlias{Slug: "failed.txt", Owner: "user-1", Visibility: "public", Status: AliasStatusFailed}
+	metadata.aliases["ready.txt"] = ShareAlias{Slug: "ready.txt", ObjectSHA256: testSHA256, ObjectKey: key, Owner: "user-1", Visibility: "public", Status: AliasStatusReady}
+	server := NewServer(cfg, fakeAuth{err: ErrUnauthorized}, &fakeStore{}, metadata, slog.Default())
+
+	for _, item := range []struct {
+		path string
+		want int
+	}{
+		{"/s/pending.txt", http.StatusAccepted},
+		{"/s/failed.txt", http.StatusServiceUnavailable},
+		{"/s/ready.txt", http.StatusFound},
+	} {
+		request := httptest.NewRequest(http.MethodGet, item.path, nil)
+		recorder := httptest.NewRecorder()
+		server.ServeHTTP(recorder, request)
+		if recorder.Code != item.want {
+			t.Fatalf("%s status = %d, want %d", item.path, recorder.Code, item.want)
+		}
+		if item.want == http.StatusFound && recorder.Header().Get("Location") != "https://bucket.s3.us-west-004.backblazeb2.com/"+key {
+			t.Fatalf("location = %q", recorder.Header().Get("Location"))
+		}
+	}
+	if metadata.aliases["ready.txt"].RedirectCount != 1 {
+		t.Fatalf("redirect count = %d", metadata.aliases["ready.txt"].RedirectCount)
+	}
+}
+
+func TestListSharesReturnsPendingAndReadyHistory(t *testing.T) {
+	metadata := newMemoryMetadata()
+	key := "01/" + testSHA256 + ".txt"
+	metadata.objects[testSHA256] = StoredObject{SHA256: testSHA256, ObjectKey: key, Size: 12, ContentType: "text/plain", Status: "ready"}
+	metadata.aliases["pending.txt"] = ShareAlias{Slug: "pending.txt", Owner: "user-1", DisplayFilename: "pending.txt", Visibility: "public", Status: AliasStatusPending}
+	metadata.aliases["ready.txt"] = ShareAlias{Slug: "ready.txt", ObjectSHA256: testSHA256, ObjectKey: key, Owner: "user-1", DisplayFilename: "ready.txt", Visibility: "public", Status: AliasStatusReady}
+	metadata.aliases["deleted.txt"] = ShareAlias{Slug: "deleted.txt", Owner: "user-1", Visibility: "deleted", Status: AliasStatusReady}
+	server := NewServer(testConfig(t), authenticatedFakeAuth("user-1"), &fakeStore{}, metadata, slog.Default())
 	request := httptest.NewRequest(http.MethodGet, "/api/shares", nil)
 	recorder := httptest.NewRecorder()
 
@@ -733,16 +556,27 @@ func TestListSharesReturnsAuthenticatedUserHistory(t *testing.T) {
 	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
 		t.Fatal(err)
 	}
-	if len(response.Shares) != 1 || response.Shares[0].PublicURL != "https://share.doesthings.online/s/mine.txt" {
+	if len(response.Shares) != 2 {
 		t.Fatalf("response = %#v", response)
+	}
+	for _, share := range response.Shares {
+		if share.PublicURL != "https://share.doesthings.online/s/"+share.Slug {
+			t.Fatalf("share = %#v", share)
+		}
+		if share.Slug == "ready.txt" && share.B2URL != "https://bucket.s3.us-west-004.backblazeb2.com/"+key {
+			t.Fatalf("share = %#v", share)
+		}
 	}
 }
 
-func TestDeleteShareSoftDeletesOwnedAlias(t *testing.T) {
+func TestDeleteShareRemovesUnreferencedB2ObjectAndPreservesStats(t *testing.T) {
 	metadata := newMemoryMetadata()
-	metadata.objects[testSHA256] = StoredObject{SHA256: testSHA256, ObjectKey: "s/" + testSHA256 + ".txt", Size: 12, ContentType: "text/plain"}
-	metadata.aliases["mine.txt"] = ShareAlias{Slug: "mine.txt", ObjectSHA256: testSHA256, ObjectKey: "s/" + testSHA256 + ".txt", Owner: "user-1", Visibility: "public"}
-	server := NewServer(testConfig(), authenticatedFakeAuth("user-1"), &fakeStore{}, metadata, slog.Default())
+	key := "01/" + testSHA256 + ".txt"
+	lastRedirected := time.Date(2026, 6, 28, 12, 1, 0, 0, time.UTC)
+	metadata.objects[testSHA256] = StoredObject{SHA256: testSHA256, ObjectKey: key, Size: 12, ContentType: "text/plain", Status: "ready"}
+	metadata.aliases["mine.txt"] = ShareAlias{Slug: "mine.txt", ObjectSHA256: testSHA256, ObjectKey: key, Owner: "user-1", Visibility: "public", Status: AliasStatusReady, RedirectCount: 7, LastRedirectedAt: lastRedirected}
+	store := &fakeStore{objects: map[string][]byte{key: []byte("hello")}}
+	server := NewServer(testConfig(t), authenticatedFakeAuth("user-1"), store, metadata, slog.Default())
 	request := httptest.NewRequest(http.MethodDelete, "/api/shares/mine.txt", nil)
 	setCSRF(request)
 	recorder := httptest.NewRecorder()
@@ -752,270 +586,46 @@ func TestDeleteShareSoftDeletesOwnedAlias(t *testing.T) {
 	if recorder.Code != http.StatusNoContent {
 		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
 	}
-	if metadata.aliases["mine.txt"].Visibility != "deleted" {
-		t.Fatalf("alias visibility = %q", metadata.aliases["mine.txt"].Visibility)
+	alias := metadata.aliases["mine.txt"]
+	if alias.Visibility != "deleted" || alias.RedirectCount != 7 || !alias.LastRedirectedAt.Equal(lastRedirected) {
+		t.Fatalf("alias = %#v", alias)
+	}
+	if len(store.deleted) != 1 || store.deleted[0] != key {
+		t.Fatalf("deleted = %#v", store.deleted)
+	}
+	if metadata.objects[testSHA256].Status != "deleted" {
+		t.Fatalf("object = %#v", metadata.objects[testSHA256])
 	}
 }
 
-func TestDeleteShareRequiresOwner(t *testing.T) {
+func TestDeleteShareKeepsB2ObjectStillReferenced(t *testing.T) {
 	metadata := newMemoryMetadata()
-	metadata.objects[testSHA256] = StoredObject{SHA256: testSHA256, ObjectKey: "s/" + testSHA256 + ".txt", Size: 12, ContentType: "text/plain"}
-	metadata.aliases["other.txt"] = ShareAlias{Slug: "other.txt", ObjectSHA256: testSHA256, ObjectKey: "s/" + testSHA256 + ".txt", Owner: "user-2", Visibility: "public"}
-	server := NewServer(testConfig(), authenticatedFakeAuth("user-1"), &fakeStore{}, metadata, slog.Default())
-	request := httptest.NewRequest(http.MethodDelete, "/api/shares/other.txt", nil)
-	setCSRF(request)
-	recorder := httptest.NewRecorder()
-
-	server.ServeHTTP(recorder, request)
-
-	if recorder.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusNotFound)
-	}
-	if metadata.aliases["other.txt"].Visibility != "public" {
-		t.Fatalf("alias visibility = %q", metadata.aliases["other.txt"].Visibility)
-	}
-}
-
-func TestDeleteShareRejectsMissingCSRFToken(t *testing.T) {
-	metadata := newMemoryMetadata()
-	server := NewServer(testConfig(), authenticatedFakeAuth("user-1"), &fakeStore{}, metadata, slog.Default())
+	key := "01/" + testSHA256 + ".txt"
+	metadata.objects[testSHA256] = StoredObject{SHA256: testSHA256, ObjectKey: key, Size: 12, ContentType: "text/plain", Status: "ready"}
+	metadata.aliases["mine.txt"] = ShareAlias{Slug: "mine.txt", ObjectSHA256: testSHA256, ObjectKey: key, Owner: "user-1", Visibility: "public", Status: AliasStatusReady}
+	metadata.aliases["also-mine.txt"] = ShareAlias{Slug: "also-mine.txt", ObjectSHA256: testSHA256, ObjectKey: key, Owner: "user-1", Visibility: "public", Status: AliasStatusReady}
+	store := &fakeStore{objects: map[string][]byte{key: []byte("hello")}}
+	server := NewServer(testConfig(t), authenticatedFakeAuth("user-1"), store, metadata, slog.Default())
 	request := httptest.NewRequest(http.MethodDelete, "/api/shares/mine.txt", nil)
-	recorder := httptest.NewRecorder()
-
-	server.ServeHTTP(recorder, request)
-
-	if recorder.Code != http.StatusForbidden {
-		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusForbidden)
-	}
-}
-
-func TestCreateProcessingJobQueuesOwnedAlias(t *testing.T) {
-	metadata := newMemoryMetadata()
-	metadata.objects[testSHA256] = StoredObject{
-		SHA256:      testSHA256,
-		ObjectKey:   "s/" + testSHA256 + ".mp4",
-		Size:        42,
-		ContentType: "video/mp4",
-		Extension:   ".mp4",
-	}
-	metadata.aliases["mine.mp4"] = ShareAlias{
-		Slug:            "mine.mp4",
-		ObjectSHA256:    testSHA256,
-		ObjectKey:       "s/" + testSHA256 + ".mp4",
-		Owner:           "user-1",
-		DisplayFilename: "mine.mp4",
-		Visibility:      "public",
-	}
-	server := NewServer(testConfig(), authenticatedFakeAuth("user-1"), &fakeStore{}, metadata, slog.Default())
-	request := httptest.NewRequest(http.MethodPost, "/api/shares/mine.mp4/processing-jobs", strings.NewReader(`{"profile":"mp4-faststart-remux"}`))
 	setCSRF(request)
 	recorder := httptest.NewRecorder()
 
 	server.ServeHTTP(recorder, request)
 
-	if recorder.Code != http.StatusAccepted {
+	if recorder.Code != http.StatusNoContent {
 		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
 	}
-	var response processingJobResponse
-	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
-		t.Fatal(err)
+	if len(store.deleted) != 0 {
+		t.Fatalf("deleted = %#v", store.deleted)
 	}
-	if response.JobID == "" || response.Status != ProcessingStatusQueued || response.Profile != ProcessingProfileMP4FaststartRemux {
-		t.Fatalf("response = %#v", response)
-	}
-	if response.AliasSlug != "mine.mp4" || response.SourceSHA256 != testSHA256 {
-		t.Fatalf("response = %#v", response)
+	if metadata.objects[testSHA256].Status == "deleted" {
+		t.Fatalf("object = %#v", metadata.objects[testSHA256])
 	}
 }
 
-func TestCreateProcessingJobReturnsExistingInFlightJob(t *testing.T) {
-	metadata := newMemoryMetadata()
-	metadata.objects[testSHA256] = StoredObject{SHA256: testSHA256, ObjectKey: "s/" + testSHA256 + ".mp4", Size: 42, ContentType: "video/mp4", Extension: ".mp4"}
-	metadata.aliases["mine.mp4"] = ShareAlias{Slug: "mine.mp4", ObjectSHA256: testSHA256, Owner: "user-1", DisplayFilename: "mine.mp4", Visibility: "public"}
-	metadata.jobs["job-1"] = ProcessingJob{
-		ID:           "job-1",
-		Owner:        "user-1",
-		AliasSlug:    "mine.mp4",
-		SourceSHA256: testSHA256,
-		Profile:      ProcessingProfileMP4FaststartRemux,
-		Status:       ProcessingStatusRunning,
-	}
-	server := NewServer(testConfig(), authenticatedFakeAuth("user-1"), &fakeStore{}, metadata, slog.Default())
-	request := httptest.NewRequest(http.MethodPost, "/api/shares/mine.mp4/processing-jobs", strings.NewReader(`{"profile":"mp4-faststart-remux"}`))
-	setCSRF(request)
-	recorder := httptest.NewRecorder()
-
-	server.ServeHTTP(recorder, request)
-
-	if recorder.Code != http.StatusAccepted {
-		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
-	}
-	var response processingJobResponse
-	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
-		t.Fatal(err)
-	}
-	if response.JobID != "job-1" || response.Status != ProcessingStatusRunning {
-		t.Fatalf("response = %#v", response)
-	}
-}
-
-func TestCreateProcessingJobRequiresOwner(t *testing.T) {
-	metadata := newMemoryMetadata()
-	metadata.objects[testSHA256] = StoredObject{SHA256: testSHA256, ObjectKey: "s/" + testSHA256 + ".mp4", Size: 42, ContentType: "video/mp4", Extension: ".mp4"}
-	metadata.aliases["other.mp4"] = ShareAlias{Slug: "other.mp4", ObjectSHA256: testSHA256, Owner: "user-2", Visibility: "public"}
-	server := NewServer(testConfig(), authenticatedFakeAuth("user-1"), &fakeStore{}, metadata, slog.Default())
-	request := httptest.NewRequest(http.MethodPost, "/api/shares/other.mp4/processing-jobs", strings.NewReader(`{"profile":"mp4-faststart-remux"}`))
-	setCSRF(request)
-	recorder := httptest.NewRecorder()
-
-	server.ServeHTTP(recorder, request)
-
-	if recorder.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusNotFound)
-	}
-}
-
-func TestCreateProcessingJobRejectsDisabledProfile(t *testing.T) {
-	server := NewServer(testConfig(), authenticatedFakeAuth("user-1"), &fakeStore{}, newMemoryMetadata(), slog.Default())
-	request := httptest.NewRequest(http.MethodPost, "/api/shares/mine.mp4/processing-jobs", strings.NewReader(`{"profile":"mp4-h264-aac-discord"}`))
-	setCSRF(request)
-	recorder := httptest.NewRecorder()
-
-	server.ServeHTTP(recorder, request)
-
-	if recorder.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusBadRequest)
-	}
-}
-
-func TestCreateProcessingJobRejectsMissingCSRFToken(t *testing.T) {
-	server := NewServer(testConfig(), authenticatedFakeAuth("user-1"), &fakeStore{}, newMemoryMetadata(), slog.Default())
-	request := httptest.NewRequest(http.MethodPost, "/api/shares/mine.mp4/processing-jobs", strings.NewReader(`{"profile":"mp4-faststart-remux"}`))
-	recorder := httptest.NewRecorder()
-
-	server.ServeHTTP(recorder, request)
-
-	if recorder.Code != http.StatusForbidden {
-		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusForbidden)
-	}
-}
-
-func TestGetProcessingJobRequiresOwner(t *testing.T) {
-	metadata := newMemoryMetadata()
-	metadata.jobs["job-1"] = ProcessingJob{ID: "job-1", Owner: "user-2", AliasSlug: "other.mp4", SourceSHA256: testSHA256, Profile: ProcessingProfileMP4FaststartRemux, Status: ProcessingStatusQueued}
-	server := NewServer(testConfig(), authenticatedFakeAuth("user-1"), &fakeStore{}, metadata, slog.Default())
-	request := httptest.NewRequest(http.MethodGet, "/api/processing-jobs/job-1", nil)
-	recorder := httptest.NewRecorder()
-
-	server.ServeHTTP(recorder, request)
-
-	if recorder.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusNotFound)
-	}
-}
-
-func TestGetProcessingJobReturnsStatus(t *testing.T) {
-	metadata := newMemoryMetadata()
-	metadata.jobs["job-1"] = ProcessingJob{
-		ID:           "job-1",
-		Owner:        "user-1",
-		AliasSlug:    "mine.mp4",
-		SourceSHA256: testSHA256,
-		Profile:      ProcessingProfileMP4FaststartRemux,
-		Status:       ProcessingStatusCompleted,
-		TargetSHA256: strings.Repeat("b", 64),
-	}
-	server := NewServer(testConfig(), authenticatedFakeAuth("user-1"), &fakeStore{}, metadata, slog.Default())
-	request := httptest.NewRequest(http.MethodGet, "/api/processing-jobs/job-1", nil)
-	recorder := httptest.NewRecorder()
-
-	server.ServeHTTP(recorder, request)
-
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
-	}
-	var response processingJobResponse
-	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
-		t.Fatal(err)
-	}
-	if response.JobID != "job-1" || response.Status != ProcessingStatusCompleted || response.TargetSHA256 != strings.Repeat("b", 64) {
-		t.Fatalf("response = %#v", response)
-	}
-}
-
-func TestSessionEndpointReturnsAuthenticatedUserAndCSRF(t *testing.T) {
-	server := NewServer(testConfig(), authenticatedFakeAuth("user-1"), &fakeStore{}, newMemoryMetadata(), slog.Default())
-	request := httptest.NewRequest(http.MethodGet, "/api/session", nil)
-	recorder := httptest.NewRecorder()
-
-	server.ServeHTTP(recorder, request)
-
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
-	}
-	var response sessionResponse
-	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
-		t.Fatal(err)
-	}
-	if !response.Authenticated || response.User.Subject != "user-1" || response.CSRFToken != "csrf-token" {
-		t.Fatalf("response = %#v", response)
-	}
-}
-
-func TestSessionEndpointReturnsAnonymousSessionState(t *testing.T) {
-	server := NewServer(testConfig(), fakeAuth{err: ErrUnauthorized}, &fakeStore{}, newMemoryMetadata(), slog.Default())
-	request := httptest.NewRequest(http.MethodGet, "/api/session", nil)
-	recorder := httptest.NewRecorder()
-
-	server.ServeHTTP(recorder, request)
-
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
-	}
-	var response sessionResponse
-	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
-		t.Fatal(err)
-	}
-	if response.Authenticated {
-		t.Fatalf("response = %#v", response)
-	}
-}
-
-func TestWebRoutesServeAppAndManifest(t *testing.T) {
-	server := NewServer(testConfig(), fakeAuth{err: ErrUnauthorized}, &fakeStore{}, newMemoryMetadata(), slog.Default())
-
-	for _, path := range []string{"/", "/share"} {
-		request := httptest.NewRequest(http.MethodGet, path, nil)
-		recorder := httptest.NewRecorder()
-		server.ServeHTTP(recorder, request)
-		if recorder.Code != http.StatusOK {
-			t.Fatalf("%s status = %d, body = %s", path, recorder.Code, recorder.Body.String())
-		}
-		if !strings.Contains(recorder.Body.String(), `<link rel="manifest" href="/manifest.webmanifest">`) {
-			t.Fatalf("%s did not serve the app shell", path)
-		}
-		if !strings.Contains(recorder.Body.String(), `<body class="auth-pending">`) {
-			t.Fatalf("%s app shell should hide upload UI until auth check", path)
-		}
-		if strings.Contains(recorder.Body.String(), `>Sign in<`) {
-			t.Fatalf("%s app shell should not render a manual sign-in button", path)
-		}
-	}
-
-	request := httptest.NewRequest(http.MethodGet, "/manifest.webmanifest", nil)
-	recorder := httptest.NewRecorder()
-	server.ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("manifest status = %d, body = %s", recorder.Code, recorder.Body.String())
-	}
-	if !strings.Contains(recorder.Body.String(), `"share_target"`) || !strings.Contains(recorder.Body.String(), `"/share-target"`) {
-		t.Fatalf("manifest missing share target: %s", recorder.Body.String())
-	}
-}
-
-func TestShareTargetPostIsNotServerSideUploadFallback(t *testing.T) {
-	server := NewServer(testConfig(), fakeAuth{err: ErrUnauthorized}, &fakeStore{}, newMemoryMetadata(), slog.Default())
-	request := httptest.NewRequest(http.MethodPost, "/share-target", strings.NewReader("not uploaded here"))
+func TestShareTargetPostRejectsServerSideByteFallback(t *testing.T) {
+	server := NewServer(testConfig(t), fakeAuth{err: ErrUnauthorized}, &fakeStore{}, newMemoryMetadata(), slog.Default())
+	request := httptest.NewRequest(http.MethodPost, "/share-target", strings.NewReader("body"))
 	recorder := httptest.NewRecorder()
 
 	server.ServeHTTP(recorder, request)
