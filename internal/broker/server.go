@@ -56,6 +56,22 @@ type listSharesResponse struct {
 	Shares []ShareAlias `json:"shares"`
 }
 
+type createProcessingJobRequest struct {
+	Profile string `json:"profile"`
+}
+
+type processingJobResponse struct {
+	JobID           string `json:"jobId"`
+	Status          string `json:"status"`
+	Profile         string `json:"profile"`
+	AliasSlug       string `json:"aliasSlug"`
+	SourceSHA256    string `json:"sourceSha256"`
+	SourceObjectKey string `json:"sourceObjectKey,omitempty"`
+	TargetSHA256    string `json:"targetSha256,omitempty"`
+	TargetObjectKey string `json:"targetObjectKey,omitempty"`
+	Error           string `json:"error,omitempty"`
+}
+
 func NewServer(cfg Config, auth Authenticator, store ObjectStore, metadata MetadataStore, logger *slog.Logger) *Server {
 	return NewServerWithLogin(cfg, auth, nil, store, metadata, logger)
 }
@@ -83,6 +99,7 @@ func NewServerWithLogin(cfg Config, auth Authenticator, login *OIDCLogin, store 
 	server.mux.HandleFunc("/api/uploads/complete", server.handleCompleteUpload)
 	server.mux.HandleFunc("/api/shares", server.handleListShares)
 	server.mux.HandleFunc("/api/shares/", server.handleShare)
+	server.mux.HandleFunc("/api/processing-jobs/", server.handleProcessingJob)
 	server.mux.HandleFunc("/share-target", server.handleShareTargetFallback)
 	server.registerWebRoutes()
 	return server
@@ -394,6 +411,10 @@ func (s *Server) handleListShares(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleShare(w http.ResponseWriter, r *http.Request) {
+	if slug, ok := shareProcessingSlugFromPath(r.URL.EscapedPath()); ok {
+		s.handleCreateProcessingJob(w, r, slug)
+		return
+	}
 	if r.Method != http.MethodDelete {
 		w.Header().Set("Allow", "DELETE")
 		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -426,6 +447,78 @@ func (s *Server) handleShare(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (s *Server) handleCreateProcessingJob(w http.ResponseWriter, r *http.Request, slug string) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", "POST")
+		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	authenticated, err := s.auth.Authenticate(r)
+	if err != nil {
+		writeAuthError(w, err)
+		return
+	}
+	if err := requireCSRF(authenticated, r); err != nil {
+		writeAuthError(w, err)
+		return
+	}
+	var request createProcessingJobRequest
+	if err := decodeJSONBody(w, r, &request); err != nil {
+		return
+	}
+	request.Profile = strings.TrimSpace(request.Profile)
+	if err := ValidateProcessingProfile(request.Profile); err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	jobID, err := NewProcessingJobID()
+	if err != nil {
+		s.logger.Error("failed to create processing job id", "error", err)
+		writeJSONError(w, http.StatusInternalServerError, "failed to create processing job")
+		return
+	}
+	job, found, err := s.metadata.CreateProcessingJob(r.Context(), jobID, slug, authenticated.Principal.Subject, request.Profile)
+	if err != nil {
+		s.logger.Error("failed to create processing job", "slug", slug, "profile", request.Profile, "error", err)
+		writeJSONError(w, http.StatusInternalServerError, "failed to create processing job")
+		return
+	}
+	if !found {
+		http.NotFound(w, r)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, processingJobResponseFromJob(job))
+}
+
+func (s *Server) handleProcessingJob(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD")
+		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	authenticated, err := s.auth.Authenticate(r)
+	if err != nil {
+		writeAuthError(w, err)
+		return
+	}
+	jobID, ok := slugFromEscapedPath(r.URL.EscapedPath(), "/api/processing-jobs/")
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	job, found, err := s.metadata.GetProcessingJob(r.Context(), jobID, authenticated.Principal.Subject)
+	if err != nil {
+		s.logger.Error("failed to get processing job", "jobID", jobID, "error", err)
+		writeJSONError(w, http.StatusInternalServerError, "failed to get processing job")
+		return
+	}
+	if !found {
+		http.NotFound(w, r)
+		return
+	}
+	writeJSON(w, http.StatusOK, processingJobResponseFromJob(job))
+}
+
 func (s *Server) handleShareTargetFallback(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet || r.Method == http.MethodHead {
 		http.Redirect(w, r, "/share", http.StatusFound)
@@ -441,6 +534,23 @@ func (s *Server) handleShareTargetFallback(w http.ResponseWriter, r *http.Reques
 
 func shareSlugFromPath(escapedPath string) (string, bool) {
 	return slugFromEscapedPath(escapedPath, "/s/")
+}
+
+func shareProcessingSlugFromPath(escapedPath string) (string, bool) {
+	const prefix = "/api/shares/"
+	const suffix = "/processing-jobs"
+	if !strings.HasPrefix(escapedPath, prefix) || !strings.HasSuffix(escapedPath, suffix) {
+		return "", false
+	}
+	escapedSlug := strings.TrimSuffix(strings.TrimPrefix(escapedPath, prefix), suffix)
+	if escapedSlug == "" || strings.Contains(escapedSlug, "/") {
+		return "", false
+	}
+	slug, err := url.PathUnescape(escapedSlug)
+	if err != nil || slug == "" || strings.Contains(slug, "/") {
+		return "", false
+	}
+	return slug, true
 }
 
 func slugFromEscapedPath(escapedPath, prefix string) (string, bool) {
@@ -492,4 +602,18 @@ func writeJSON(w http.ResponseWriter, statusCode int, payload any) {
 
 func writeJSONError(w http.ResponseWriter, statusCode int, message string) {
 	writeJSON(w, statusCode, map[string]string{"error": message})
+}
+
+func processingJobResponseFromJob(job ProcessingJob) processingJobResponse {
+	return processingJobResponse{
+		JobID:           job.ID,
+		Status:          job.Status,
+		Profile:         job.Profile,
+		AliasSlug:       job.AliasSlug,
+		SourceSHA256:    job.SourceSHA256,
+		SourceObjectKey: job.SourceObjectKey,
+		TargetSHA256:    job.TargetSHA256,
+		TargetObjectKey: job.TargetObjectKey,
+		Error:           job.Error,
+	}
 }

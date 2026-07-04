@@ -38,6 +38,34 @@ type ShareAlias struct {
 	PublicURL        string    `json:"publicUrl"`
 }
 
+type ProcessingJob struct {
+	ID              string    `json:"jobId"`
+	Owner           string    `json:"owner,omitempty"`
+	AliasSlug       string    `json:"aliasSlug"`
+	SourceSHA256    string    `json:"sourceSha256"`
+	SourceObjectKey string    `json:"sourceObjectKey,omitempty"`
+	TargetSHA256    string    `json:"targetSha256,omitempty"`
+	TargetObjectKey string    `json:"targetObjectKey,omitempty"`
+	Profile         string    `json:"profile"`
+	Status          string    `json:"status"`
+	Error           string    `json:"error,omitempty"`
+	CreatedAt       time.Time `json:"createdAt"`
+	UpdatedAt       time.Time `json:"updatedAt"`
+	StartedAt       time.Time `json:"startedAt,omitempty"`
+	CompletedAt     time.Time `json:"completedAt,omitempty"`
+	DisplayFilename string    `json:"displayFilename,omitempty"`
+	SourceSize      int64     `json:"sourceSize,omitempty"`
+	SourceType      string    `json:"sourceContentType,omitempty"`
+}
+
+type ObjectDerivative struct {
+	SourceSHA256 string    `json:"sourceSha256"`
+	TargetSHA256 string    `json:"targetSha256"`
+	Profile      string    `json:"profile"`
+	JobID        string    `json:"jobId"`
+	CreatedAt    time.Time `json:"createdAt"`
+}
+
 type MetadataStore interface {
 	GetObject(ctx context.Context, sha256 string) (StoredObject, bool, error)
 	UpsertObjectAndAlias(ctx context.Context, object StoredObject, alias ShareAlias) error
@@ -46,6 +74,11 @@ type MetadataStore interface {
 	RecordAliasRedirect(ctx context.Context, slug string) error
 	ListAliases(ctx context.Context, owner string, limit int) ([]ShareAlias, error)
 	DeleteAlias(ctx context.Context, slug, owner string) (bool, error)
+	CreateProcessingJob(ctx context.Context, id, slug, owner, profile string) (ProcessingJob, bool, error)
+	GetProcessingJob(ctx context.Context, id, owner string) (ProcessingJob, bool, error)
+	ClaimNextProcessingJob(ctx context.Context, worker string) (ProcessingJob, bool, error)
+	CompleteProcessingJob(ctx context.Context, id string, object StoredObject, alias ShareAlias) error
+	FailProcessingJob(ctx context.Context, id, message string) error
 }
 
 type PostgresMetadataStore struct {
@@ -120,6 +153,34 @@ func (s *PostgresMetadataStore) runMigrations(ctx context.Context) error {
 			changed_at timestamptz NOT NULL DEFAULT now()
 		)`,
 		`CREATE INDEX IF NOT EXISTS alias_history_slug_idx ON alias_history(slug, changed_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS processing_jobs (
+			id text PRIMARY KEY,
+			owner_subject text NOT NULL,
+			alias_slug text NOT NULL,
+			source_object_sha256 text NOT NULL REFERENCES objects(sha256),
+			target_object_sha256 text REFERENCES objects(sha256),
+			profile text NOT NULL,
+			status text NOT NULL CHECK (status IN ('queued', 'running', 'completed', 'failed')),
+			error text NOT NULL DEFAULT '',
+			worker text NOT NULL DEFAULT '',
+			created_at timestamptz NOT NULL DEFAULT now(),
+			updated_at timestamptz NOT NULL DEFAULT now(),
+			started_at timestamptz,
+			completed_at timestamptz
+		)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS processing_jobs_inflight_idx
+			ON processing_jobs (owner_subject, alias_slug, source_object_sha256, profile)
+			WHERE status IN ('queued', 'running')`,
+		`CREATE INDEX IF NOT EXISTS processing_jobs_owner_created_idx ON processing_jobs(owner_subject, created_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS processing_jobs_queue_idx ON processing_jobs(status, created_at)`,
+		`CREATE TABLE IF NOT EXISTS object_derivatives (
+			source_object_sha256 text NOT NULL REFERENCES objects(sha256),
+			target_object_sha256 text NOT NULL REFERENCES objects(sha256),
+			profile text NOT NULL,
+			processing_job_id text NOT NULL REFERENCES processing_jobs(id),
+			created_at timestamptz NOT NULL DEFAULT now(),
+			PRIMARY KEY (source_object_sha256, profile)
+		)`,
 	} {
 		if _, err := conn.ExecContext(ctx, statement); err != nil {
 			return err
@@ -331,4 +392,241 @@ func (s *PostgresMetadataStore) DeleteAlias(ctx context.Context, slug, owner str
 		return false, err
 	}
 	return count > 0, nil
+}
+
+func (s *PostgresMetadataStore) CreateProcessingJob(ctx context.Context, id, slug, owner, profile string) (ProcessingJob, bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return ProcessingJob{}, false, err
+	}
+	defer tx.Rollback()
+
+	var sourceSHA string
+	err = tx.QueryRowContext(ctx, `SELECT object_sha256
+		FROM aliases
+		WHERE slug = $1
+			AND owner_subject = $2
+			AND visibility = 'public'
+		FOR UPDATE`, slug, owner).Scan(&sourceSHA)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ProcessingJob{}, false, nil
+	}
+	if err != nil {
+		return ProcessingJob{}, false, err
+	}
+
+	var existingID string
+	err = tx.QueryRowContext(ctx, `SELECT id
+		FROM processing_jobs
+		WHERE owner_subject = $1
+			AND alias_slug = $2
+			AND source_object_sha256 = $3
+			AND profile = $4
+			AND status IN ('queued', 'running')
+		ORDER BY created_at DESC
+		LIMIT 1`,
+		owner, slug, sourceSHA, profile,
+	).Scan(&existingID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return ProcessingJob{}, false, err
+	}
+	if existingID != "" {
+		job, found, err := getProcessingJobTx(ctx, tx, existingID, owner)
+		if err != nil {
+			return ProcessingJob{}, false, err
+		}
+		if !found {
+			return ProcessingJob{}, false, fmt.Errorf("processing job %q disappeared", existingID)
+		}
+		return job, true, tx.Commit()
+	}
+
+	if _, err := tx.ExecContext(ctx, `INSERT INTO processing_jobs (id, owner_subject, alias_slug, source_object_sha256, profile, status)
+		VALUES ($1, $2, $3, $4, $5, 'queued')`,
+		id, owner, slug, sourceSHA, profile,
+	); err != nil {
+		return ProcessingJob{}, false, err
+	}
+	job, found, err := getProcessingJobTx(ctx, tx, id, owner)
+	if err != nil {
+		return ProcessingJob{}, false, err
+	}
+	if !found {
+		return ProcessingJob{}, false, fmt.Errorf("processing job %q was not recorded", id)
+	}
+	return job, true, tx.Commit()
+}
+
+func (s *PostgresMetadataStore) GetProcessingJob(ctx context.Context, id, owner string) (ProcessingJob, bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return ProcessingJob{}, false, err
+	}
+	defer tx.Rollback()
+	job, found, err := getProcessingJobTx(ctx, tx, id, owner)
+	if err != nil {
+		return ProcessingJob{}, false, err
+	}
+	return job, found, tx.Commit()
+}
+
+func (s *PostgresMetadataStore) ClaimNextProcessingJob(ctx context.Context, worker string) (ProcessingJob, bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return ProcessingJob{}, false, err
+	}
+	defer tx.Rollback()
+
+	var id string
+	err = tx.QueryRowContext(ctx, `SELECT id
+		FROM processing_jobs
+		WHERE status = 'queued'
+		ORDER BY created_at
+		FOR UPDATE SKIP LOCKED
+		LIMIT 1`).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ProcessingJob{}, false, nil
+	}
+	if err != nil {
+		return ProcessingJob{}, false, err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE processing_jobs
+		SET status = 'running', worker = $2, started_at = now(), updated_at = now()
+		WHERE id = $1`, id, worker); err != nil {
+		return ProcessingJob{}, false, err
+	}
+	job, found, err := getProcessingJobTx(ctx, tx, id, "")
+	if err != nil {
+		return ProcessingJob{}, false, err
+	}
+	if !found {
+		return ProcessingJob{}, false, fmt.Errorf("processing job %q disappeared", id)
+	}
+	return job, true, tx.Commit()
+}
+
+func (s *PostgresMetadataStore) CompleteProcessingJob(ctx context.Context, id string, object StoredObject, alias ShareAlias) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var sourceSHA string
+	var profile string
+	err = tx.QueryRowContext(ctx, `SELECT source_object_sha256, profile
+		FROM processing_jobs
+		WHERE id = $1
+			AND status = 'running'
+		FOR UPDATE`, id).Scan(&sourceSHA, &profile)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("running processing job %q not found", id)
+	}
+	if err != nil {
+		return err
+	}
+
+	if _, err := tx.ExecContext(ctx, `INSERT INTO objects (sha256, object_key, size_bytes, content_type, extension, first_filename, uploader_subject)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		ON CONFLICT (sha256) DO UPDATE SET
+			object_key = EXCLUDED.object_key,
+			size_bytes = EXCLUDED.size_bytes,
+			content_type = EXCLUDED.content_type,
+			extension = EXCLUDED.extension,
+			first_filename = EXCLUDED.first_filename`,
+		object.SHA256,
+		object.ObjectKey,
+		object.Size,
+		object.ContentType,
+		object.Extension,
+		object.FirstFilename,
+		object.Uploader,
+	); err != nil {
+		return err
+	}
+	if err := upsertAliasTx(ctx, tx, alias); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO object_derivatives (source_object_sha256, target_object_sha256, profile, processing_job_id)
+		VALUES ($1, $2, $3, $4)
+		ON CONFLICT (source_object_sha256, profile) DO UPDATE SET
+			target_object_sha256 = EXCLUDED.target_object_sha256,
+			processing_job_id = EXCLUDED.processing_job_id,
+			created_at = now()`,
+		sourceSHA,
+		object.SHA256,
+		profile,
+		id,
+	); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE processing_jobs
+		SET status = 'completed', target_object_sha256 = $2, completed_at = now(), updated_at = now(), error = ''
+		WHERE id = $1`, id, object.SHA256); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *PostgresMetadataStore) FailProcessingJob(ctx context.Context, id, message string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE processing_jobs
+		SET status = 'failed', error = $2, completed_at = now(), updated_at = now()
+		WHERE id = $1
+			AND status IN ('queued', 'running')`, id, message)
+	return err
+}
+
+func getProcessingJobTx(ctx context.Context, tx *sql.Tx, id, owner string) (ProcessingJob, bool, error) {
+	query := `SELECT
+			j.id, j.owner_subject, j.alias_slug, j.source_object_sha256, o.object_key,
+			COALESCE(j.target_object_sha256, ''), COALESCE(t.object_key, ''),
+			j.profile, j.status, j.error,
+			j.created_at, j.updated_at, j.started_at, j.completed_at,
+			a.display_filename, o.size_bytes, o.content_type
+		FROM processing_jobs j
+		JOIN aliases a ON a.slug = j.alias_slug
+		JOIN objects o ON o.sha256 = j.source_object_sha256
+		LEFT JOIN objects t ON t.sha256 = j.target_object_sha256
+		WHERE j.id = $1`
+	args := []any{id}
+	if owner != "" {
+		query += ` AND j.owner_subject = $2`
+		args = append(args, owner)
+	}
+
+	var job ProcessingJob
+	var started sql.NullTime
+	var completed sql.NullTime
+	err := tx.QueryRowContext(ctx, query, args...).Scan(
+		&job.ID,
+		&job.Owner,
+		&job.AliasSlug,
+		&job.SourceSHA256,
+		&job.SourceObjectKey,
+		&job.TargetSHA256,
+		&job.TargetObjectKey,
+		&job.Profile,
+		&job.Status,
+		&job.Error,
+		&job.CreatedAt,
+		&job.UpdatedAt,
+		&started,
+		&completed,
+		&job.DisplayFilename,
+		&job.SourceSize,
+		&job.SourceType,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ProcessingJob{}, false, nil
+	}
+	if err != nil {
+		return ProcessingJob{}, false, err
+	}
+	if started.Valid {
+		job.StartedAt = started.Time
+	}
+	if completed.Valid {
+		job.CompletedAt = completed.Time
+	}
+	return job, true, nil
 }

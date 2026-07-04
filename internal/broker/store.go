@@ -2,6 +2,7 @@ package broker
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -27,6 +28,8 @@ type ObjectMetadata struct {
 type ObjectStore interface {
 	PresignPutObject(ctx context.Context, key, contentType string, size int64, ttl time.Duration) (PresignedUpload, error)
 	HeadObject(ctx context.Context, key string) (ObjectMetadata, error)
+	DownloadObject(ctx context.Context, key string, writer io.Writer) error
+	PutObject(ctx context.Context, key, contentType string, size int64, reader io.Reader) (ObjectMetadata, error)
 }
 
 type B2Store struct {
@@ -86,6 +89,37 @@ func (s *B2Store) HeadObject(ctx context.Context, key string) (ObjectMetadata, e
 		ETag:          strings.Trim(aws.ToString(response.ETag), `"`),
 	}
 	return metadata, nil
+}
+
+func (s *B2Store) DownloadObject(ctx context.Context, key string, writer io.Writer) error {
+	response, err := s.client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	_, err = io.Copy(writer, response.Body)
+	return err
+}
+
+func (s *B2Store) PutObject(ctx context.Context, key, contentType string, size int64, reader io.Reader) (ObjectMetadata, error) {
+	response, err := s.client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket:        aws.String(s.bucket),
+		Key:           aws.String(key),
+		Body:          reader,
+		ContentLength: aws.Int64(size),
+		ContentType:   aws.String(contentType),
+	})
+	if err != nil {
+		return ObjectMetadata{}, err
+	}
+	return ObjectMetadata{
+		ContentLength: size,
+		ContentType:   contentType,
+		ETag:          strings.Trim(aws.ToString(response.ETag), `"`),
+	}, nil
 }
 
 func PublicURL(baseURL, objectKey string) string {

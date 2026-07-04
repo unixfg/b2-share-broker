@@ -227,6 +227,11 @@ h2 {
 }
 
 .media-warning {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 12px;
+  flex-wrap: wrap;
   margin: 12px 0 0;
   padding: 10px 12px;
   border: 1px solid var(--warn-line);
@@ -234,6 +239,10 @@ h2 {
   background: var(--warn-bg);
   color: #5f4200;
   font-size: 0.92rem;
+}
+
+.media-warning span {
+  flex: 1 1 240px;
 }
 
 .history-list {

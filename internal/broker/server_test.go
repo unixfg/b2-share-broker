@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -32,6 +33,9 @@ type fakeStore struct {
 	headErr       error
 	presignedKey  string
 	presignedType string
+	objects       map[string][]byte
+	putKey        string
+	putType       string
 }
 
 func (s *fakeStore) PresignPutObject(_ context.Context, key, contentType string, _ int64, _ time.Duration) (PresignedUpload, error) {
@@ -47,16 +51,46 @@ func (s *fakeStore) HeadObject(context.Context, string) (ObjectMetadata, error) 
 	return s.head, nil
 }
 
+func (s *fakeStore) DownloadObject(_ context.Context, key string, writer io.Writer) error {
+	if s.objects == nil {
+		return errors.New("object store is empty")
+	}
+	body, ok := s.objects[key]
+	if !ok {
+		return errors.New("object not found")
+	}
+	_, err := writer.Write(body)
+	return err
+}
+
+func (s *fakeStore) PutObject(_ context.Context, key, contentType string, size int64, reader io.Reader) (ObjectMetadata, error) {
+	if s.objects == nil {
+		s.objects = map[string][]byte{}
+	}
+	body, err := io.ReadAll(reader)
+	if err != nil {
+		return ObjectMetadata{}, err
+	}
+	s.objects[key] = body
+	s.putKey = key
+	s.putType = contentType
+	return ObjectMetadata{ContentLength: size, ContentType: contentType, ETag: "put-etag"}, nil
+}
+
 type memoryMetadata struct {
-	objects map[string]StoredObject
-	aliases map[string]ShareAlias
-	history []ShareAlias
+	objects     map[string]StoredObject
+	aliases     map[string]ShareAlias
+	history     []ShareAlias
+	jobs        map[string]ProcessingJob
+	derivatives map[string]ObjectDerivative
 }
 
 func newMemoryMetadata() *memoryMetadata {
 	return &memoryMetadata{
-		objects: map[string]StoredObject{},
-		aliases: map[string]ShareAlias{},
+		objects:     map[string]StoredObject{},
+		aliases:     map[string]ShareAlias{},
+		jobs:        map[string]ProcessingJob{},
+		derivatives: map[string]ObjectDerivative{},
 	}
 }
 
@@ -124,6 +158,96 @@ func (m *memoryMetadata) DeleteAlias(_ context.Context, slug, owner string) (boo
 	alias.UpdatedAt = time.Date(2026, 6, 28, 12, 2, 0, 0, time.UTC)
 	m.aliases[slug] = alias
 	return true, nil
+}
+
+func (m *memoryMetadata) CreateProcessingJob(_ context.Context, id, slug, owner, profile string) (ProcessingJob, bool, error) {
+	alias, ok := m.aliases[slug]
+	if !ok || alias.Owner != owner || alias.Visibility != "public" {
+		return ProcessingJob{}, false, nil
+	}
+	for _, job := range m.jobs {
+		if job.Owner == owner && job.AliasSlug == slug && job.SourceSHA256 == alias.ObjectSHA256 && job.Profile == profile &&
+			(job.Status == ProcessingStatusQueued || job.Status == ProcessingStatusRunning) {
+			return job, true, nil
+		}
+	}
+	object := m.objects[alias.ObjectSHA256]
+	job := ProcessingJob{
+		ID:              id,
+		Owner:           owner,
+		AliasSlug:       slug,
+		SourceSHA256:    alias.ObjectSHA256,
+		SourceObjectKey: object.ObjectKey,
+		Profile:         profile,
+		Status:          ProcessingStatusQueued,
+		CreatedAt:       time.Date(2026, 6, 28, 12, 3, 0, 0, time.UTC),
+		UpdatedAt:       time.Date(2026, 6, 28, 12, 3, 0, 0, time.UTC),
+		DisplayFilename: alias.DisplayFilename,
+		SourceSize:      object.Size,
+		SourceType:      object.ContentType,
+	}
+	m.jobs[id] = job
+	return job, true, nil
+}
+
+func (m *memoryMetadata) GetProcessingJob(_ context.Context, id, owner string) (ProcessingJob, bool, error) {
+	job, ok := m.jobs[id]
+	if !ok || (owner != "" && job.Owner != owner) {
+		return ProcessingJob{}, false, nil
+	}
+	return job, true, nil
+}
+
+func (m *memoryMetadata) ClaimNextProcessingJob(_ context.Context, worker string) (ProcessingJob, bool, error) {
+	for id, job := range m.jobs {
+		if job.Status != ProcessingStatusQueued {
+			continue
+		}
+		job.Status = ProcessingStatusRunning
+		job.UpdatedAt = time.Date(2026, 6, 28, 12, 4, 0, 0, time.UTC)
+		job.StartedAt = job.UpdatedAt
+		m.jobs[id] = job
+		return job, true, nil
+	}
+	return ProcessingJob{}, false, nil
+}
+
+func (m *memoryMetadata) CompleteProcessingJob(_ context.Context, id string, object StoredObject, alias ShareAlias) error {
+	job, ok := m.jobs[id]
+	if !ok || job.Status != ProcessingStatusRunning {
+		return errors.New("running job not found")
+	}
+	m.objects[object.SHA256] = object
+	if err := m.UpsertAlias(context.Background(), alias); err != nil {
+		return err
+	}
+	job.Status = ProcessingStatusCompleted
+	job.TargetSHA256 = object.SHA256
+	job.TargetObjectKey = object.ObjectKey
+	job.CompletedAt = time.Date(2026, 6, 28, 12, 5, 0, 0, time.UTC)
+	job.UpdatedAt = job.CompletedAt
+	m.jobs[id] = job
+	m.derivatives[job.SourceSHA256+"|"+job.Profile] = ObjectDerivative{
+		SourceSHA256: job.SourceSHA256,
+		TargetSHA256: object.SHA256,
+		Profile:      job.Profile,
+		JobID:        id,
+		CreatedAt:    job.CompletedAt,
+	}
+	return nil
+}
+
+func (m *memoryMetadata) FailProcessingJob(_ context.Context, id, message string) error {
+	job, ok := m.jobs[id]
+	if !ok {
+		return nil
+	}
+	job.Status = ProcessingStatusFailed
+	job.Error = message
+	job.CompletedAt = time.Date(2026, 6, 28, 12, 5, 0, 0, time.UTC)
+	job.UpdatedAt = job.CompletedAt
+	m.jobs[id] = job
+	return nil
 }
 
 func testConfig() Config {
@@ -547,6 +671,160 @@ func TestDeleteShareRejectsMissingCSRFToken(t *testing.T) {
 
 	if recorder.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusForbidden)
+	}
+}
+
+func TestCreateProcessingJobQueuesOwnedAlias(t *testing.T) {
+	metadata := newMemoryMetadata()
+	metadata.objects[testSHA256] = StoredObject{
+		SHA256:      testSHA256,
+		ObjectKey:   "s/" + testSHA256 + ".mp4",
+		Size:        42,
+		ContentType: "video/mp4",
+		Extension:   ".mp4",
+	}
+	metadata.aliases["mine.mp4"] = ShareAlias{
+		Slug:            "mine.mp4",
+		ObjectSHA256:    testSHA256,
+		ObjectKey:       "s/" + testSHA256 + ".mp4",
+		Owner:           "user-1",
+		DisplayFilename: "mine.mp4",
+		Visibility:      "public",
+	}
+	server := NewServer(testConfig(), authenticatedFakeAuth("user-1"), &fakeStore{}, metadata, slog.Default())
+	request := httptest.NewRequest(http.MethodPost, "/api/shares/mine.mp4/processing-jobs", strings.NewReader(`{"profile":"mp4-faststart-remux"}`))
+	setCSRF(request)
+	recorder := httptest.NewRecorder()
+
+	server.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	var response processingJobResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.JobID == "" || response.Status != ProcessingStatusQueued || response.Profile != ProcessingProfileMP4FaststartRemux {
+		t.Fatalf("response = %#v", response)
+	}
+	if response.AliasSlug != "mine.mp4" || response.SourceSHA256 != testSHA256 {
+		t.Fatalf("response = %#v", response)
+	}
+}
+
+func TestCreateProcessingJobReturnsExistingInFlightJob(t *testing.T) {
+	metadata := newMemoryMetadata()
+	metadata.objects[testSHA256] = StoredObject{SHA256: testSHA256, ObjectKey: "s/" + testSHA256 + ".mp4", Size: 42, ContentType: "video/mp4", Extension: ".mp4"}
+	metadata.aliases["mine.mp4"] = ShareAlias{Slug: "mine.mp4", ObjectSHA256: testSHA256, Owner: "user-1", DisplayFilename: "mine.mp4", Visibility: "public"}
+	metadata.jobs["job-1"] = ProcessingJob{
+		ID:           "job-1",
+		Owner:        "user-1",
+		AliasSlug:    "mine.mp4",
+		SourceSHA256: testSHA256,
+		Profile:      ProcessingProfileMP4FaststartRemux,
+		Status:       ProcessingStatusRunning,
+	}
+	server := NewServer(testConfig(), authenticatedFakeAuth("user-1"), &fakeStore{}, metadata, slog.Default())
+	request := httptest.NewRequest(http.MethodPost, "/api/shares/mine.mp4/processing-jobs", strings.NewReader(`{"profile":"mp4-faststart-remux"}`))
+	setCSRF(request)
+	recorder := httptest.NewRecorder()
+
+	server.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	var response processingJobResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.JobID != "job-1" || response.Status != ProcessingStatusRunning {
+		t.Fatalf("response = %#v", response)
+	}
+}
+
+func TestCreateProcessingJobRequiresOwner(t *testing.T) {
+	metadata := newMemoryMetadata()
+	metadata.objects[testSHA256] = StoredObject{SHA256: testSHA256, ObjectKey: "s/" + testSHA256 + ".mp4", Size: 42, ContentType: "video/mp4", Extension: ".mp4"}
+	metadata.aliases["other.mp4"] = ShareAlias{Slug: "other.mp4", ObjectSHA256: testSHA256, Owner: "user-2", Visibility: "public"}
+	server := NewServer(testConfig(), authenticatedFakeAuth("user-1"), &fakeStore{}, metadata, slog.Default())
+	request := httptest.NewRequest(http.MethodPost, "/api/shares/other.mp4/processing-jobs", strings.NewReader(`{"profile":"mp4-faststart-remux"}`))
+	setCSRF(request)
+	recorder := httptest.NewRecorder()
+
+	server.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusNotFound)
+	}
+}
+
+func TestCreateProcessingJobRejectsDisabledProfile(t *testing.T) {
+	server := NewServer(testConfig(), authenticatedFakeAuth("user-1"), &fakeStore{}, newMemoryMetadata(), slog.Default())
+	request := httptest.NewRequest(http.MethodPost, "/api/shares/mine.mp4/processing-jobs", strings.NewReader(`{"profile":"mp4-h264-aac-discord"}`))
+	setCSRF(request)
+	recorder := httptest.NewRecorder()
+
+	server.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusBadRequest)
+	}
+}
+
+func TestCreateProcessingJobRejectsMissingCSRFToken(t *testing.T) {
+	server := NewServer(testConfig(), authenticatedFakeAuth("user-1"), &fakeStore{}, newMemoryMetadata(), slog.Default())
+	request := httptest.NewRequest(http.MethodPost, "/api/shares/mine.mp4/processing-jobs", strings.NewReader(`{"profile":"mp4-faststart-remux"}`))
+	recorder := httptest.NewRecorder()
+
+	server.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusForbidden)
+	}
+}
+
+func TestGetProcessingJobRequiresOwner(t *testing.T) {
+	metadata := newMemoryMetadata()
+	metadata.jobs["job-1"] = ProcessingJob{ID: "job-1", Owner: "user-2", AliasSlug: "other.mp4", SourceSHA256: testSHA256, Profile: ProcessingProfileMP4FaststartRemux, Status: ProcessingStatusQueued}
+	server := NewServer(testConfig(), authenticatedFakeAuth("user-1"), &fakeStore{}, metadata, slog.Default())
+	request := httptest.NewRequest(http.MethodGet, "/api/processing-jobs/job-1", nil)
+	recorder := httptest.NewRecorder()
+
+	server.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusNotFound)
+	}
+}
+
+func TestGetProcessingJobReturnsStatus(t *testing.T) {
+	metadata := newMemoryMetadata()
+	metadata.jobs["job-1"] = ProcessingJob{
+		ID:           "job-1",
+		Owner:        "user-1",
+		AliasSlug:    "mine.mp4",
+		SourceSHA256: testSHA256,
+		Profile:      ProcessingProfileMP4FaststartRemux,
+		Status:       ProcessingStatusCompleted,
+		TargetSHA256: strings.Repeat("b", 64),
+	}
+	server := NewServer(testConfig(), authenticatedFakeAuth("user-1"), &fakeStore{}, metadata, slog.Default())
+	request := httptest.NewRequest(http.MethodGet, "/api/processing-jobs/job-1", nil)
+	recorder := httptest.NewRecorder()
+
+	server.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	var response processingJobResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.JobID != "job-1" || response.Status != ProcessingStatusCompleted || response.TargetSHA256 != strings.Repeat("b", 64) {
+		t.Fatalf("response = %#v", response)
 	}
 }
 
