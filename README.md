@@ -51,7 +51,6 @@ OIDC bearer token with the configured share role.
 Request is `multipart/form-data`:
 
 - `file`: required, exactly one file
-- `alias`: optional custom share slug
 
 Response:
 
@@ -66,7 +65,7 @@ Response:
 
 Generated aliases use a random 16-hex prefix plus a sanitized filename and the
 final output extension. Video uploads get `.mp4` aliases because the processor
-normalizes them before publication.
+normalizes them before publication. Custom aliases are not supported.
 
 ### `GET /api/uploads/{jobId}`
 

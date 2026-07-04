@@ -292,6 +292,9 @@ func (m *memoryMetadata) FailProcessingJob(_ context.Context, id, message string
 
 func (m *memoryMetadata) upsertAlias(alias ShareAlias) error {
 	if previous, ok := m.aliases[alias.Slug]; ok {
+		if previous.Owner != alias.Owner {
+			return ErrAliasConflict
+		}
 		if previous.ObjectSHA256 != "" && alias.ObjectSHA256 != "" && previous.ObjectSHA256 != alias.ObjectSHA256 {
 			m.history = append(m.history, previous)
 		}
@@ -444,7 +447,7 @@ func TestCreateUploadVideoQueuesMP4Normalization(t *testing.T) {
 	cfg := testConfig(t)
 	metadata := newMemoryMetadata()
 	server := NewServer(cfg, authenticatedFakeAuth("user-1"), &fakeStore{}, metadata, slog.Default())
-	body, contentType := multipartUpload(t, "file", "Clip.mov", "video/quicktime", []byte("mov data"), "demo.mov")
+	body, contentType := multipartUpload(t, "file", "Clip.mov", "video/quicktime", []byte("mov data"), "")
 	request := httptest.NewRequest(http.MethodPost, "/api/uploads", body)
 	request.Header.Set("Content-Type", contentType)
 	setCSRF(request)
@@ -459,12 +462,39 @@ func TestCreateUploadVideoQueuesMP4Normalization(t *testing.T) {
 	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
 		t.Fatal(err)
 	}
-	if response.Slug != "demo.mp4" {
+	if !strings.HasSuffix(response.Slug, "-clip.mp4") {
 		t.Fatalf("slug = %q", response.Slug)
 	}
 	job := metadata.jobs[response.JobID]
 	if job.Profile != ProcessingProfileMP4Web || job.SourceType != "video/quicktime" {
 		t.Fatalf("job = %#v", job)
+	}
+}
+
+func TestCreateUploadRejectsCustomAliasField(t *testing.T) {
+	cfg := testConfig(t)
+	metadata := newMemoryMetadata()
+	server := NewServer(cfg, authenticatedFakeAuth("user-1"), &fakeStore{}, metadata, slog.Default())
+	body, contentType := multipartUpload(t, "file", "demo.txt", "text/plain", []byte("replacement"), "demo")
+	request := httptest.NewRequest(http.MethodPost, "/api/uploads", body)
+	request.Header.Set("Content-Type", contentType)
+	setCSRF(request)
+	recorder := httptest.NewRecorder()
+
+	server.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	if len(metadata.jobs) != 0 {
+		t.Fatalf("jobs = %#v", metadata.jobs)
+	}
+	entries, err := os.ReadDir(cfg.StagingDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("staging entries = %d, want 0", len(entries))
 	}
 }
 
