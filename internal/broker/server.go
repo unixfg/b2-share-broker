@@ -222,15 +222,14 @@ func (s *Server) handleCreateUpload(w http.ResponseWriter, r *http.Request) {
 		contentType = normalizedContentType(contentType)
 		profile = ProcessingProfileMP4Web
 	}
-	slug := ""
-	if manual := strings.TrimSpace(r.FormValue("alias")); manual != "" {
-		slug = NormalizeManualAlias(manual, finalExtension)
-	} else {
-		slug, err = GenerateRandomAliasSlug(filename, finalExtension)
-		if err != nil {
-			writeJSONError(w, http.StatusInternalServerError, "failed to create share slug")
-			return
-		}
+	if strings.TrimSpace(r.FormValue("alias")) != "" {
+		writeJSONError(w, http.StatusBadRequest, "custom aliases are not supported")
+		return
+	}
+	slug, err := GenerateRandomAliasSlug(filename, finalExtension)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "failed to create share slug")
+		return
 	}
 	jobID, err := NewProcessingJobID()
 	if err != nil {
@@ -268,6 +267,10 @@ func (s *Server) handleCreateUpload(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		_ = os.Remove(stagingPath)
+		if errors.Is(err, ErrAliasConflict) {
+			writeJSONError(w, http.StatusConflict, "share alias is already in use")
+			return
+		}
 		s.logger.Error("failed to create ingest job", "slug", slug, "error", err)
 		writeJSONError(w, http.StatusInternalServerError, "failed to create upload job")
 		return

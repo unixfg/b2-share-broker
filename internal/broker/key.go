@@ -1,10 +1,8 @@
 package broker
 
 import (
-	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
-	"encoding/base32"
 	"encoding/hex"
 	"fmt"
 	"mime"
@@ -15,7 +13,6 @@ import (
 )
 
 var repeatedDash = regexp.MustCompile(`[-_]{2,}`)
-var repeatedAliasSeparator = regexp.MustCompile(`[-_]{2,}`)
 
 func NormalizeSHA256(value string) (string, []byte, error) {
 	value = strings.ToLower(strings.TrimSpace(value))
@@ -36,65 +33,6 @@ func GenerateObjectKey(sha256Hex, extension string) string {
 		return sha256Hex + extension
 	}
 	return sha256Hex[:2] + "/" + sha256Hex + extension
-}
-
-func GenerateAliasSlug(key []byte, sha256Bytes []byte, extension string) string {
-	mac := hmac.New(sha256.New, key)
-	mac.Write(sha256Bytes)
-	encoded := strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(mac.Sum(nil)))
-	return encoded[:26] + normalizeExtension(extension)
-}
-
-func NormalizeManualAlias(alias, extension string) string {
-	alias = strings.TrimSpace(alias)
-	alias = strings.TrimPrefix(alias, "/")
-	alias = strings.TrimPrefix(alias, "s/")
-	alias = strings.TrimPrefix(alias, "/s/")
-	alias = path.Base(strings.ReplaceAll(alias, "\\", "/"))
-	alias = strings.ToLower(alias)
-
-	var builder strings.Builder
-	lastWasSeparator := false
-	for _, r := range alias {
-		switch {
-		case r == '.':
-			builder.WriteByte('.')
-			lastWasSeparator = false
-		case r == '-' || r == '_' || unicode.IsSpace(r):
-			if !lastWasSeparator {
-				builder.WriteByte('-')
-				lastWasSeparator = true
-			}
-		case r <= unicode.MaxASCII && (unicode.IsLetter(r) || unicode.IsDigit(r)):
-			builder.WriteRune(r)
-			lastWasSeparator = false
-		}
-	}
-
-	cleaned := strings.Trim(builder.String(), ".-_")
-	cleaned = repeatedAliasSeparator.ReplaceAllString(cleaned, "-")
-	if cleaned == "" {
-		cleaned = "share"
-	}
-	finalExtension := normalizeExtension(extension)
-	if existing := path.Ext(cleaned); existing != "" {
-		cleaned = strings.TrimSuffix(cleaned, existing)
-	}
-	cleaned += finalExtension
-	if len(cleaned) > 180 {
-		ext := path.Ext(cleaned)
-		base := strings.TrimSuffix(cleaned, ext)
-		limit := 180 - len(ext)
-		if limit < 1 {
-			limit = 180
-			ext = ""
-		}
-		cleaned = strings.Trim(base[:limit], ".-_") + ext
-	}
-	if cleaned == "" {
-		cleaned = "share" + normalizeExtension(extension)
-	}
-	return cleaned
 }
 
 func GenerateRandomAliasSlug(filename, extension string) (string, error) {

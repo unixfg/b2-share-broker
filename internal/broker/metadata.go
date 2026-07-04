@@ -93,6 +93,8 @@ type MetadataStore interface {
 	FailProcessingJob(ctx context.Context, id, message string) error
 }
 
+var ErrAliasConflict = errors.New("share alias is already owned by another user")
+
 type PostgresMetadataStore struct {
 	db *sql.DB
 }
@@ -604,15 +606,19 @@ func upsertObjectTx(ctx context.Context, tx *sql.Tx, object StoredObject) error 
 }
 
 func upsertAliasTx(ctx context.Context, tx *sql.Tx, alias ShareAlias) error {
-	var previous sql.NullString
-	err := tx.QueryRowContext(ctx, `SELECT object_sha256 FROM aliases WHERE slug = $1 FOR UPDATE`, alias.Slug).Scan(&previous)
+	var previousObject sql.NullString
+	var previousOwner string
+	err := tx.QueryRowContext(ctx, `SELECT object_sha256, owner_subject FROM aliases WHERE slug = $1 FOR UPDATE`, alias.Slug).Scan(&previousObject, &previousOwner)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
-	if previous.Valid && previous.String != "" && alias.ObjectSHA256 != "" && previous.String != alias.ObjectSHA256 {
+	if err == nil && previousOwner != alias.Owner {
+		return ErrAliasConflict
+	}
+	if previousObject.Valid && previousObject.String != "" && alias.ObjectSHA256 != "" && previousObject.String != alias.ObjectSHA256 {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO alias_history (slug, previous_object_sha256, new_object_sha256, changed_by_subject) VALUES ($1, $2, $3, $4)`,
 			alias.Slug,
-			previous.String,
+			previousObject.String,
 			alias.ObjectSHA256,
 			alias.Owner,
 		); err != nil {

@@ -147,29 +147,6 @@ h2 {
   white-space: nowrap;
 }
 
-.field {
-  display: grid;
-  gap: 6px;
-  margin-top: 14px;
-  font-size: 0.92rem;
-  font-weight: 680;
-}
-
-.field input {
-  min-height: 42px;
-  width: 100%;
-  padding: 0 12px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: #ffffff;
-  color: var(--ink);
-}
-
-.field input:focus {
-  outline: 3px solid color-mix(in srgb, var(--focus) 24%, transparent);
-  border-color: var(--focus);
-}
-
 .button {
   display: inline-flex;
   align-items: center;

@@ -40,34 +40,6 @@ func TestNormalizeSHA256(t *testing.T) {
 	}
 }
 
-func TestGenerateAliasSlug(t *testing.T) {
-	_, raw, err := NormalizeSHA256(strings.Repeat("a", 64))
-	if err != nil {
-		t.Fatal(err)
-	}
-	slug := GenerateAliasSlug([]byte("alias-key-012345678901234567890123"), raw, ".PNG")
-	if !strings.HasSuffix(slug, ".png") || len(strings.TrimSuffix(slug, ".png")) != 26 {
-		t.Fatalf("slug = %q", slug)
-	}
-}
-
-func TestNormalizeManualAlias(t *testing.T) {
-	tests := map[string]string{
-		"Latest Screenshot": "latest-screenshot.png",
-		"/s/Report.PDF":     "report.png",
-		"../bad name":       "bad-name.txt",
-	}
-	for input, want := range tests {
-		ext := ".png"
-		if strings.Contains(input, "bad") {
-			ext = ".txt"
-		}
-		if got := NormalizeManualAlias(input, ext); got != want {
-			t.Fatalf("NormalizeManualAlias(%q) = %q, want %q", input, got, want)
-		}
-	}
-}
-
 func TestGenerateRandomAliasSlugUsesFilenameAndFinalExtension(t *testing.T) {
 	slug, err := GenerateRandomAliasSlug("Clip MOV.mov", ".mp4")
 	if err != nil {

@@ -37,7 +37,6 @@ function bindElements() {
     "logoutLink",
     "uploadForm",
     "fileInput",
-    "aliasInput",
     "dropzone",
     "fileTitle",
     "fileMeta",
@@ -75,7 +74,6 @@ function bindEvents() {
     await clearPending();
     setFile(null);
     state.publicUrl = "";
-    els.aliasInput.value = "";
     setStatus("Ready");
     render();
   });
@@ -217,12 +215,8 @@ async function uploadSelectedFile() {
   try {
     setStatus("Uploading");
     els.uploadButton.disabled = true;
-    const alias = els.aliasInput.value.trim();
     const form = new FormData();
     form.append("file", file, file.name || "upload");
-    if (alias) {
-      form.append("alias", alias);
-    }
     const createResponse = await apiFetch("/api/uploads", {
       method: "POST",
       body: form
