@@ -196,14 +196,15 @@ func (m *SessionManager) cookie(name, value string, maxAge int) *http.Cookie {
 }
 
 type OIDCLogin struct {
-	clientID      string
-	roles         roleAuthorizer
-	oauth2Config  oauth2.Config
-	verifier      *oidc.IDTokenVerifier
-	sessions      *SessionManager
-	sessionKey    []byte
-	clock         func() time.Time
-	secureCookies bool
+	clientID       string
+	roles          roleAuthorizer
+	oauth2Config   oauth2.Config
+	verifier       *oidc.IDTokenVerifier
+	accessVerifier *oidc.IDTokenVerifier
+	sessions       *SessionManager
+	sessionKey     []byte
+	clock          func() time.Time
+	secureCookies  bool
 }
 
 type oauthState struct {
@@ -229,11 +230,12 @@ func NewOIDCLogin(ctx context.Context, cfg Config, sessions *SessionManager) (*O
 			RedirectURL:  strings.TrimRight(cfg.PublicBaseURL, "/") + "/auth/callback",
 			Scopes:       []string{oidc.ScopeOpenID, "email", "profile"},
 		},
-		verifier:      provider.Verifier(&oidc.Config{ClientID: cfg.OIDCClientID}),
-		sessions:      sessions,
-		sessionKey:    cfg.SessionAuthKey,
-		clock:         cfg.Clock,
-		secureCookies: strings.HasPrefix(cfg.PublicBaseURL, "https://"),
+		verifier:       provider.Verifier(&oidc.Config{ClientID: cfg.OIDCClientID}),
+		accessVerifier: provider.Verifier(&oidc.Config{ClientID: cfg.OIDCAudience}),
+		sessions:       sessions,
+		sessionKey:     cfg.SessionAuthKey,
+		clock:          cfg.Clock,
+		secureCookies:  strings.HasPrefix(cfg.PublicBaseURL, "https://"),
 	}, nil
 }
 
@@ -337,16 +339,39 @@ func (l *OIDCLogin) Complete(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusUnauthorized, "login nonce invalid")
 		return
 	}
-	if !l.roles.Allows(claims.keycloakClaims, l.clientID) {
+	loginClaims := claims.keycloakClaims
+	if accessClaims, ok := l.accessTokenClaims(r.Context(), token, idToken.Subject); ok {
+		loginClaims = mergeKeycloakClaims(loginClaims, accessClaims)
+	}
+	if !l.roles.Allows(loginClaims, l.clientID) {
 		writeAuthError(w, ErrForbidden)
 		return
 	}
-	_, err = l.sessions.Create(w, principalFromClaims(idToken.Subject, claims.keycloakClaims, l.clientID))
+	_, err = l.sessions.Create(w, principalFromClaims(idToken.Subject, loginClaims, l.clientID))
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "failed to create session")
 		return
 	}
 	http.Redirect(w, r, cleanReturnTo(state.ReturnTo), http.StatusFound)
+}
+
+func (l *OIDCLogin) accessTokenClaims(ctx context.Context, token *oauth2.Token, subject string) (keycloakClaims, bool) {
+	rawAccessToken, ok := token.Extra("access_token").(string)
+	if !ok || strings.TrimSpace(rawAccessToken) == "" {
+		return keycloakClaims{}, false
+	}
+	accessToken, err := l.accessVerifier.Verify(ctx, rawAccessToken)
+	if err != nil {
+		return keycloakClaims{}, false
+	}
+	if accessToken.Subject != "" && subject != "" && accessToken.Subject != subject {
+		return keycloakClaims{}, false
+	}
+	var claims keycloakClaims
+	if err := accessToken.Claims(&claims); err != nil {
+		return keycloakClaims{}, false
+	}
+	return claims, true
 }
 
 func (l *OIDCLogin) Logout(w http.ResponseWriter, r *http.Request) {
@@ -427,6 +452,47 @@ func principalFromClaims(subject string, claims keycloakClaims, clientID string)
 		PreferredUsername: claims.PreferredUsername,
 		Roles:             collectRoles(claims, clientID),
 	}
+}
+
+func mergeKeycloakClaims(primary, secondary keycloakClaims) keycloakClaims {
+	merged := primary
+	if merged.Email == "" {
+		merged.Email = secondary.Email
+	}
+	if merged.PreferredUsername == "" {
+		merged.PreferredUsername = secondary.PreferredUsername
+	}
+	merged.RealmAccess.Roles = mergeRoleValues(primary.RealmAccess.Roles, secondary.RealmAccess.Roles)
+	if primary.ResourceAccess != nil || secondary.ResourceAccess != nil {
+		merged.ResourceAccess = map[string]struct {
+			Roles []string `json:"roles"`
+		}{}
+		for clientID, access := range primary.ResourceAccess {
+			merged.ResourceAccess[clientID] = access
+		}
+		for clientID, access := range secondary.ResourceAccess {
+			existing := merged.ResourceAccess[clientID]
+			existing.Roles = mergeRoleValues(existing.Roles, access.Roles)
+			merged.ResourceAccess[clientID] = existing
+		}
+	}
+	return merged
+}
+
+func mergeRoleValues(values ...[]string) []string {
+	seen := map[string]bool{}
+	var roles []string
+	for _, group := range values {
+		for _, role := range group {
+			role = strings.TrimSpace(role)
+			if role == "" || seen[role] {
+				continue
+			}
+			seen[role] = true
+			roles = append(roles, role)
+		}
+	}
+	return roles
 }
 
 func collectRoles(claims keycloakClaims, clientID string) []string {
