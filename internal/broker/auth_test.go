@@ -101,6 +101,31 @@ func TestRoleAuthorizerAllowsRealmOrClientRole(t *testing.T) {
 	}
 }
 
+func TestMergeKeycloakClaimsAllowsAccessTokenRole(t *testing.T) {
+	authorizer := newRoleAuthorizer([]string{"b2-share-user"})
+	var idClaims keycloakClaims
+	idClaims.Email = "person@example.test"
+
+	var accessClaims keycloakClaims
+	accessClaims.ResourceAccess = map[string]struct {
+		Roles []string `json:"roles"`
+	}{
+		"b2-share-web": {Roles: []string{"b2-share-user"}},
+	}
+
+	merged := mergeKeycloakClaims(idClaims, accessClaims)
+	if !authorizer.Allows(merged, "b2-share-web") {
+		t.Fatal("expected merged access token role to authorize")
+	}
+	principal := principalFromClaims("subject", merged, "b2-share-web")
+	if principal.Email != "person@example.test" {
+		t.Fatalf("principal email = %q", principal.Email)
+	}
+	if len(principal.Roles) != 1 || principal.Roles[0] != "b2-share-user" {
+		t.Fatalf("principal roles = %#v", principal.Roles)
+	}
+}
+
 func TestCleanReturnToRejectsExternalAndAuthTargets(t *testing.T) {
 	tests := map[string]string{
 		"":                           "/",
