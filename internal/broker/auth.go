@@ -231,7 +231,7 @@ func NewOIDCLogin(ctx context.Context, cfg Config, sessions *SessionManager) (*O
 			Scopes:       []string{oidc.ScopeOpenID, "email", "profile"},
 		},
 		verifier:       provider.Verifier(&oidc.Config{ClientID: cfg.OIDCClientID}),
-		accessVerifier: provider.Verifier(&oidc.Config{ClientID: cfg.OIDCAudience}),
+		accessVerifier: provider.Verifier(&oidc.Config{SkipClientIDCheck: true}),
 		sessions:       sessions,
 		sessionKey:     cfg.SessionAuthKey,
 		clock:          cfg.Clock,
@@ -367,11 +367,21 @@ func (l *OIDCLogin) accessTokenClaims(ctx context.Context, token *oauth2.Token, 
 	if accessToken.Subject != "" && subject != "" && accessToken.Subject != subject {
 		return keycloakClaims{}, false
 	}
-	var claims keycloakClaims
+	var claims struct {
+		keycloakClaims
+		AuthorizedParty string `json:"azp"`
+		ClientID        string `json:"client_id"`
+	}
 	if err := accessToken.Claims(&claims); err != nil {
 		return keycloakClaims{}, false
 	}
-	return claims, true
+	if claims.AuthorizedParty != "" && claims.AuthorizedParty != l.clientID {
+		return keycloakClaims{}, false
+	}
+	if claims.ClientID != "" && claims.ClientID != l.clientID {
+		return keycloakClaims{}, false
+	}
+	return claims.keycloakClaims, true
 }
 
 func (l *OIDCLogin) Logout(w http.ResponseWriter, r *http.Request) {
