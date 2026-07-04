@@ -99,6 +99,15 @@ func (m *memoryMetadata) GetObject(_ context.Context, sha256 string) (StoredObje
 	return object, ok, nil
 }
 
+func (m *memoryMetadata) GetDerivedObject(_ context.Context, sourceSHA256, profile string) (StoredObject, bool, error) {
+	derivative, ok := m.derivatives[sourceSHA256+"|"+profile]
+	if !ok {
+		return StoredObject{}, false, nil
+	}
+	object, ok := m.objects[derivative.TargetSHA256]
+	return object, ok, nil
+}
+
 func (m *memoryMetadata) UpsertObjectAndAlias(_ context.Context, object StoredObject, alias ShareAlias) error {
 	if object.CreatedAt.IsZero() {
 		object.CreatedAt = time.Date(2026, 6, 28, 12, 0, 0, 0, time.UTC)
@@ -108,8 +117,13 @@ func (m *memoryMetadata) UpsertObjectAndAlias(_ context.Context, object StoredOb
 }
 
 func (m *memoryMetadata) UpsertAlias(_ context.Context, alias ShareAlias) error {
-	if previous, ok := m.aliases[alias.Slug]; ok && previous.ObjectSHA256 != alias.ObjectSHA256 {
-		m.history = append(m.history, previous)
+	if previous, ok := m.aliases[alias.Slug]; ok {
+		if previous.ObjectSHA256 != alias.ObjectSHA256 {
+			m.history = append(m.history, previous)
+		}
+		alias.CreatedAt = previous.CreatedAt
+		alias.RedirectCount = previous.RedirectCount
+		alias.LastRedirectedAt = previous.LastRedirectedAt
 	}
 	object := m.objects[alias.ObjectSHA256]
 	alias.ObjectKey = object.ObjectKey
@@ -378,6 +392,63 @@ func TestCreateUploadReturnsAliasOnlyWhenObjectExists(t *testing.T) {
 	}
 }
 
+func TestCreateUploadUsesFastStartDerivativeWhenSourceExists(t *testing.T) {
+	cfg := testConfig()
+	targetSHA := strings.Repeat("b", 64)
+	metadata := newMemoryMetadata()
+	metadata.objects[testSHA256] = StoredObject{
+		SHA256:      testSHA256,
+		ObjectKey:   "s/" + testSHA256 + ".mp4",
+		Size:        42,
+		ContentType: "video/mp4",
+		Extension:   ".mp4",
+		Uploader:    "user-1",
+	}
+	metadata.objects[targetSHA] = StoredObject{
+		SHA256:      targetSHA,
+		ObjectKey:   "s/" + targetSHA + ".mp4",
+		Size:        40,
+		ContentType: "video/mp4",
+		Extension:   ".mp4",
+		Uploader:    "user-1",
+	}
+	metadata.derivatives[testSHA256+"|"+ProcessingProfileMP4FaststartRemux] = ObjectDerivative{
+		SourceSHA256: testSHA256,
+		TargetSHA256: targetSHA,
+		Profile:      ProcessingProfileMP4FaststartRemux,
+		JobID:        "job-1",
+	}
+	store := &fakeStore{}
+	server := NewServer(cfg, authenticatedFakeAuth("user-1"), store, metadata, slog.Default())
+	body := `{"filename":"again.mp4","contentType":"video/mp4","size":42,"sha256":"` + testSHA256 + `"}`
+	request := httptest.NewRequest(http.MethodPost, "/api/uploads", strings.NewReader(body))
+	setCSRF(request)
+	recorder := httptest.NewRecorder()
+
+	server.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	var response createUploadResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if !response.AlreadyUploaded || response.UploadURL != "" || response.UploadToken != "" || store.presignedKey != "" {
+		t.Fatalf("response = %#v, presigned = %q", response, store.presignedKey)
+	}
+	if response.ObjectKey != "s/"+targetSHA+".mp4" || response.B2URL != "https://bucket.s3.us-west-004.backblazeb2.com/s/"+targetSHA+".mp4" {
+		t.Fatalf("response = %#v", response)
+	}
+	if response.SourceSHA256 != testSHA256 || response.ServedSHA256 != targetSHA || response.ProcessingProfile != ProcessingProfileMP4FaststartRemux {
+		t.Fatalf("response = %#v", response)
+	}
+	slug := expectedSlug(t, cfg, ".mp4")
+	if metadata.aliases[slug].ObjectSHA256 != targetSHA {
+		t.Fatalf("alias = %#v", metadata.aliases[slug])
+	}
+}
+
 func TestCreateUploadAllowsManualAliasRepoint(t *testing.T) {
 	cfg := testConfig()
 	metadata := newMemoryMetadata()
@@ -399,6 +470,50 @@ func TestCreateUploadAllowsManualAliasRepoint(t *testing.T) {
 	}
 	if len(metadata.history) != 1 {
 		t.Fatalf("history = %#v", metadata.history)
+	}
+}
+
+func TestCreateUploadRevivesDeletedAliasAndPreservesRedirectStats(t *testing.T) {
+	cfg := testConfig()
+	slug := expectedSlug(t, cfg, ".txt")
+	lastRedirected := time.Date(2026, 6, 28, 12, 1, 0, 0, time.UTC)
+	metadata := newMemoryMetadata()
+	metadata.objects[testSHA256] = StoredObject{
+		SHA256:      testSHA256,
+		ObjectKey:   "s/" + testSHA256 + ".txt",
+		Size:        42,
+		ContentType: "text/plain",
+		Extension:   ".txt",
+		Uploader:    "user-1",
+	}
+	metadata.aliases[slug] = ShareAlias{
+		Slug:             slug,
+		ObjectSHA256:     testSHA256,
+		ObjectKey:        "s/" + testSHA256 + ".txt",
+		Owner:            "user-1",
+		DisplayFilename:  "old.txt",
+		Visibility:       "deleted",
+		RedirectCount:    7,
+		LastRedirectedAt: lastRedirected,
+		CreatedAt:        time.Date(2026, 6, 28, 11, 0, 0, 0, time.UTC),
+	}
+	server := NewServer(cfg, authenticatedFakeAuth("user-1"), &fakeStore{}, metadata, slog.Default())
+	body := `{"filename":"new.txt","contentType":"text/plain","size":42,"sha256":"` + testSHA256 + `"}`
+	request := httptest.NewRequest(http.MethodPost, "/api/uploads", strings.NewReader(body))
+	setCSRF(request)
+	recorder := httptest.NewRecorder()
+
+	server.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	alias := metadata.aliases[slug]
+	if alias.Visibility != "public" || alias.DisplayFilename != "new.txt" {
+		t.Fatalf("alias = %#v", alias)
+	}
+	if alias.RedirectCount != 7 || !alias.LastRedirectedAt.Equal(lastRedirected) {
+		t.Fatalf("redirect stats were reset: %#v", alias)
 	}
 }
 

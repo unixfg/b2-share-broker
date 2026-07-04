@@ -68,6 +68,7 @@ type ObjectDerivative struct {
 
 type MetadataStore interface {
 	GetObject(ctx context.Context, sha256 string) (StoredObject, bool, error)
+	GetDerivedObject(ctx context.Context, sourceSHA256, profile string) (StoredObject, bool, error)
 	UpsertObjectAndAlias(ctx context.Context, object StoredObject, alias ShareAlias) error
 	UpsertAlias(ctx context.Context, alias ShareAlias) error
 	GetAlias(ctx context.Context, slug string) (ShareAlias, bool, error)
@@ -210,6 +211,32 @@ func (s *PostgresMetadataStore) GetObject(ctx context.Context, sha256 string) (S
 	return object, true, nil
 }
 
+func (s *PostgresMetadataStore) GetDerivedObject(ctx context.Context, sourceSHA256, profile string) (StoredObject, bool, error) {
+	var object StoredObject
+	err := s.db.QueryRowContext(ctx, `SELECT
+			o.sha256, o.object_key, o.size_bytes, o.content_type, o.extension, o.first_filename, o.uploader_subject, o.created_at
+		FROM object_derivatives d
+		JOIN objects o ON o.sha256 = d.target_object_sha256
+		WHERE d.source_object_sha256 = $1
+			AND d.profile = $2`, sourceSHA256, profile).Scan(
+		&object.SHA256,
+		&object.ObjectKey,
+		&object.Size,
+		&object.ContentType,
+		&object.Extension,
+		&object.FirstFilename,
+		&object.Uploader,
+		&object.CreatedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return StoredObject{}, false, nil
+	}
+	if err != nil {
+		return StoredObject{}, false, err
+	}
+	return object, true, nil
+}
+
 func (s *PostgresMetadataStore) UpsertObjectAndAlias(ctx context.Context, object StoredObject, alias ShareAlias) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -268,6 +295,9 @@ func upsertAliasTx(ctx context.Context, tx *sql.Tx, alias ShareAlias) error {
 			return err
 		}
 	}
+	// Reusing a slug revives the same alias row in place. Keep created_at,
+	// redirect_count, and last_redirected_at untouched so soft-deleted shares
+	// retain their historical open stats when they are shared again.
 	_, err = tx.ExecContext(ctx, `INSERT INTO aliases (slug, object_sha256, owner_subject, display_filename, visibility)
 		VALUES ($1, $2, $3, $4, $5)
 		ON CONFLICT (slug) DO UPDATE SET

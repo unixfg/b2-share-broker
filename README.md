@@ -76,7 +76,9 @@ The browser must upload the file bytes to `uploadUrl` with every returned
 
 If the SHA-256 already exists in metadata, the response has
 `alreadyUploaded: true`, omits `uploadUrl` and `uploadToken`, and records only
-the new alias.
+the new alias. When that source object has a completed derivative, such as an
+MP4 fast-start remux, the alias points at the derivative so repeat shares keep
+serving the optimized object instead of reverting to the original bytes.
 
 ### `POST /api/uploads/complete`
 
@@ -112,6 +114,13 @@ verifies the object.
 Requires an authenticated browser session. Returns recent aliases owned by the
 current subject with filenames, sizes, content types, redirect counts, share
 URLs, and native B2 URLs.
+
+### `DELETE /api/shares/{slug}`
+
+Requires an authenticated browser session and `X-CSRF-Token`. Deletion is a
+soft delete of the alias only: the B2 object stays in place, the alias row stays
+in Postgres, and re-sharing the same slug revives that row without resetting its
+redirect count or last redirected timestamp.
 
 ### `POST /api/shares/{slug}/processing-jobs`
 
