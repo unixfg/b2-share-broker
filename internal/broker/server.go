@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"mime"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"os"
@@ -206,62 +207,28 @@ func (s *Server) handleCreateUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	r.Body = http.MaxBytesReader(w, r.Body, s.cfg.MaxUploadBytes+16<<20)
-	if err := r.ParseMultipartForm(16 << 20); err != nil {
-		var maxBytesError *http.MaxBytesError
-		if errors.As(err, &maxBytesError) || strings.Contains(err.Error(), "request body too large") {
-			writeJSONError(w, http.StatusRequestEntityTooLarge, "file is larger than the configured maximum")
-			return
-		}
-		s.logger.Warn("failed to parse multipart upload", "content_type", r.Header.Get("Content-Type"), "error", err)
-		writeJSONError(w, http.StatusBadRequest, "multipart file upload is invalid")
-		return
-	}
-	defer func() {
-		if r.MultipartForm != nil {
-			_ = r.MultipartForm.RemoveAll()
-		}
-	}()
-	file, header, err := r.FormFile("file")
+	reader, err := r.MultipartReader()
 	if err != nil {
-		writeJSONError(w, http.StatusBadRequest, "file is required")
+		s.writeMultipartError(w, r, err)
 		return
 	}
-	defer file.Close()
 
-	filename := SanitizeFilename(header.Filename)
-	contentType := strings.TrimSpace(header.Header.Get("Content-Type"))
-	if contentType == "" {
-		contentType = "application/octet-stream"
-	}
-	finalExtension := ExtensionFor(filename, contentType)
-	profile := ProcessingProfileUploadFinalize
-	if looksLikeVideo(filename, contentType) {
-		finalExtension = ".mp4"
-		contentType = normalizedContentType(contentType)
-		profile = ProcessingProfileMP4Web
-	}
-	if strings.TrimSpace(r.FormValue("alias")) != "" {
-		writeJSONError(w, http.StatusBadRequest, "custom aliases are not supported")
-		return
-	}
-	slug, err := GenerateRandomAliasSlug(filename, finalExtension)
-	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "failed to create share slug")
-		return
-	}
 	jobID, err := NewProcessingJobID()
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "failed to create upload job")
 		return
 	}
-	stagingPath, size, err := s.stageUpload(jobID, finalExtension, file)
+
+	upload, err := s.stageMultipartUpload(r, reader, jobID)
 	if err != nil {
-		if errors.Is(err, errUploadTooLarge) {
-			writeJSONError(w, http.StatusRequestEntityTooLarge, "file is larger than the configured maximum")
-			return
-		}
-		s.logger.Error("failed to stage upload", "error", err)
-		writeJSONError(w, http.StatusInternalServerError, "failed to stage upload")
+		s.writeUploadStagingError(w, r, err, "")
+		return
+	}
+
+	slug, err := GenerateRandomAliasSlug(upload.filename, upload.finalExtension)
+	if err != nil {
+		_ = os.Remove(upload.stagingPath)
+		writeJSONError(w, http.StatusInternalServerError, "failed to create share slug")
 		return
 	}
 
@@ -269,22 +236,22 @@ func (s *Server) handleCreateUpload(w http.ResponseWriter, r *http.Request) {
 		ID:              jobID,
 		Owner:           authenticated.Principal.Subject,
 		AliasSlug:       slug,
-		StagingPath:     stagingPath,
-		Profile:         profile,
+		StagingPath:     upload.stagingPath,
+		Profile:         upload.profile,
 		Status:          ProcessingStatusQueued,
-		DisplayFilename: filename,
-		SourceSize:      size,
-		SourceType:      contentType,
+		DisplayFilename: upload.filename,
+		SourceSize:      upload.size,
+		SourceType:      upload.contentType,
 	}
 	created, err := s.metadata.CreateIngestJob(r.Context(), job, ShareAlias{
 		Slug:            slug,
 		Owner:           authenticated.Principal.Subject,
-		DisplayFilename: filename,
+		DisplayFilename: upload.filename,
 		Visibility:      "public",
 		Status:          AliasStatusPending,
 	})
 	if err != nil {
-		_ = os.Remove(stagingPath)
+		_ = os.Remove(upload.stagingPath)
 		if errors.Is(err, ErrAliasConflict) {
 			writeJSONError(w, http.StatusConflict, "share alias is already in use")
 			return
@@ -413,6 +380,144 @@ func (s *Server) handleShareTargetFallback(w http.ResponseWriter, r *http.Reques
 }
 
 var errUploadTooLarge = errors.New("upload too large")
+var errUploadMissingFile = errors.New("upload file required")
+var errUploadMultipleFiles = errors.New("multiple upload files")
+var errUploadCustomAlias = errors.New("custom upload alias")
+var errMultipartRead = errors.New("multipart read failed")
+
+type stagedMultipartUpload struct {
+	filename       string
+	contentType    string
+	finalExtension string
+	profile        string
+	stagingPath    string
+	size           int64
+}
+
+func (s *Server) stageMultipartUpload(r *http.Request, reader *multipart.Reader, jobID string) (stagedMultipartUpload, error) {
+	var upload stagedMultipartUpload
+	fileSeen := false
+
+	cleanup := func() {
+		if upload.stagingPath != "" {
+			_ = os.Remove(upload.stagingPath)
+		}
+	}
+
+	for {
+		part, err := reader.NextPart()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			cleanup()
+			return stagedMultipartUpload{}, fmt.Errorf("%w: %w", errMultipartRead, err)
+		}
+
+		switch part.FormName() {
+		case "file":
+			if fileSeen {
+				_ = part.Close()
+				cleanup()
+				return stagedMultipartUpload{}, errUploadMultipleFiles
+			}
+			fileSeen = true
+			filename := SanitizeFilename(part.FileName())
+			contentType := strings.TrimSpace(part.Header.Get("Content-Type"))
+			if contentType == "" {
+				contentType = "application/octet-stream"
+			}
+			finalExtension := ExtensionFor(filename, contentType)
+			profile := ProcessingProfileUploadFinalize
+			if looksLikeVideo(filename, contentType) {
+				finalExtension = ".mp4"
+				contentType = normalizedContentType(contentType)
+				profile = ProcessingProfileMP4Web
+			}
+			stagingPath, size, err := s.stageUpload(jobID, finalExtension, part)
+			closeErr := part.Close()
+			if err != nil {
+				cleanup()
+				return stagedMultipartUpload{}, err
+			}
+			if closeErr != nil {
+				_ = os.Remove(stagingPath)
+				cleanup()
+				return stagedMultipartUpload{}, fmt.Errorf("%w: %w", errMultipartRead, closeErr)
+			}
+			upload = stagedMultipartUpload{
+				filename:       filename,
+				contentType:    contentType,
+				finalExtension: finalExtension,
+				profile:        profile,
+				stagingPath:    stagingPath,
+				size:           size,
+			}
+		case "alias":
+			value, err := io.ReadAll(io.LimitReader(part, 4097))
+			_ = part.Close()
+			if err != nil {
+				cleanup()
+				return stagedMultipartUpload{}, fmt.Errorf("%w: %w", errMultipartRead, err)
+			}
+			if len(value) > 4096 || strings.TrimSpace(string(value)) != "" {
+				cleanup()
+				return stagedMultipartUpload{}, errUploadCustomAlias
+			}
+		default:
+			if _, err := io.Copy(io.Discard, part); err != nil {
+				_ = part.Close()
+				cleanup()
+				return stagedMultipartUpload{}, fmt.Errorf("%w: %w", errMultipartRead, err)
+			}
+			_ = part.Close()
+		}
+	}
+
+	if !fileSeen {
+		return stagedMultipartUpload{}, errUploadMissingFile
+	}
+	if upload.stagingPath == "" {
+		return stagedMultipartUpload{}, errUploadMissingFile
+	}
+	return upload, nil
+}
+
+func (s *Server) writeUploadStagingError(w http.ResponseWriter, r *http.Request, err error, stagingPath string) {
+	if stagingPath != "" {
+		_ = os.Remove(stagingPath)
+	}
+	switch {
+	case errors.Is(err, errUploadMissingFile):
+		writeJSONError(w, http.StatusBadRequest, "file is required")
+	case errors.Is(err, errUploadMultipleFiles):
+		writeJSONError(w, http.StatusBadRequest, "share one file at a time")
+	case errors.Is(err, errUploadCustomAlias):
+		writeJSONError(w, http.StatusBadRequest, "custom aliases are not supported")
+	case errors.Is(err, errUploadTooLarge):
+		writeJSONError(w, http.StatusRequestEntityTooLarge, "file is larger than the configured maximum")
+	case errors.Is(err, errMultipartRead):
+		s.writeMultipartError(w, r, err)
+	default:
+		var maxBytesError *http.MaxBytesError
+		if errors.As(err, &maxBytesError) || strings.Contains(err.Error(), "request body too large") {
+			writeJSONError(w, http.StatusRequestEntityTooLarge, "file is larger than the configured maximum")
+			return
+		}
+		s.logger.Error("failed to stage upload", "error", err)
+		writeJSONError(w, http.StatusInternalServerError, "failed to stage upload")
+	}
+}
+
+func (s *Server) writeMultipartError(w http.ResponseWriter, r *http.Request, err error) {
+	var maxBytesError *http.MaxBytesError
+	if errors.As(err, &maxBytesError) || strings.Contains(err.Error(), "request body too large") {
+		writeJSONError(w, http.StatusRequestEntityTooLarge, "file is larger than the configured maximum")
+		return
+	}
+	s.logger.Warn("failed to read multipart upload", "content_type", r.Header.Get("Content-Type"), "error", err)
+	writeJSONError(w, http.StatusBadRequest, "multipart file upload is invalid")
+}
 
 func (s *Server) stageUpload(jobID, extension string, reader io.Reader) (string, int64, error) {
 	if err := os.MkdirAll(s.cfg.StagingDir, 0o700); err != nil {

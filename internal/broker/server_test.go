@@ -471,6 +471,41 @@ func TestCreateUploadVideoQueuesMP4Normalization(t *testing.T) {
 	}
 }
 
+func TestCreateUploadStreamsLargeFileWithoutMultipartTemp(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.MaxUploadBytes = 32 << 20
+	t.Setenv("TMPDIR", t.TempDir()+"/missing")
+	metadata := newMemoryMetadata()
+	server := NewServer(cfg, authenticatedFakeAuth("user-1"), &fakeStore{}, metadata, slog.Default())
+	payload := bytes.Repeat([]byte("x"), 17<<20)
+	body, contentType := multipartUpload(t, "file", "large.bin", "application/octet-stream", payload, "")
+	request := httptest.NewRequest(http.MethodPost, "/api/uploads", body)
+	request.Header.Set("Content-Type", contentType)
+	setCSRF(request)
+	recorder := httptest.NewRecorder()
+
+	server.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	var response createUploadResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	job := metadata.jobs[response.JobID]
+	if job.SourceSize != int64(len(payload)) {
+		t.Fatalf("job size = %d, want %d", job.SourceSize, len(payload))
+	}
+	staged, err := os.Stat(job.StagingPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if staged.Size() != int64(len(payload)) {
+		t.Fatalf("staged size = %d, want %d", staged.Size(), len(payload))
+	}
+}
+
 func TestCreateUploadRejectsNonMultipartBody(t *testing.T) {
 	cfg := testConfig(t)
 	metadata := newMemoryMetadata()
