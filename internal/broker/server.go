@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"mime"
 	"net/http"
 	"net/url"
 	"os"
@@ -198,11 +199,28 @@ func (s *Server) handleCreateUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	r.Body = http.MaxBytesReader(w, r.Body, s.cfg.MaxUploadBytes+16<<20)
-	if err := r.ParseMultipartForm(16 << 20); err != nil {
-		writeJSONError(w, http.StatusBadRequest, "multipart file upload is required")
+	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || mediaType != "multipart/form-data" {
+		writeJSONError(w, http.StatusBadRequest, "multipart/form-data file upload is required")
 		return
 	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, s.cfg.MaxUploadBytes+16<<20)
+	if err := r.ParseMultipartForm(16 << 20); err != nil {
+		var maxBytesError *http.MaxBytesError
+		if errors.As(err, &maxBytesError) || strings.Contains(err.Error(), "request body too large") {
+			writeJSONError(w, http.StatusRequestEntityTooLarge, "file is larger than the configured maximum")
+			return
+		}
+		s.logger.Warn("failed to parse multipart upload", "content_type", r.Header.Get("Content-Type"), "error", err)
+		writeJSONError(w, http.StatusBadRequest, "multipart file upload is invalid")
+		return
+	}
+	defer func() {
+		if r.MultipartForm != nil {
+			_ = r.MultipartForm.RemoveAll()
+		}
+	}()
 	file, header, err := r.FormFile("file")
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, "file is required")
