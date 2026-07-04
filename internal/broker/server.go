@@ -3,10 +3,13 @@ package broker
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -20,59 +23,26 @@ type Server struct {
 	mux      *http.ServeMux
 }
 
-type createUploadRequest struct {
-	Filename    string `json:"filename"`
-	ContentType string `json:"contentType"`
-	Size        int64  `json:"size"`
-	SHA256      string `json:"sha256"`
-	Alias       string `json:"alias"`
-}
-
 type createUploadResponse struct {
-	UploadURL         string            `json:"uploadUrl,omitempty"`
-	RequiredHeaders   map[string]string `json:"requiredHeaders,omitempty"`
-	ObjectKey         string            `json:"objectKey"`
-	UploadToken       string            `json:"uploadToken,omitempty"`
-	PublicURL         string            `json:"publicUrl"`
-	B2URL             string            `json:"b2Url"`
-	AlreadyUploaded   bool              `json:"alreadyUploaded"`
-	SourceSHA256      string            `json:"sourceSha256,omitempty"`
-	ServedSHA256      string            `json:"servedSha256,omitempty"`
-	ProcessingProfile string            `json:"processingProfile,omitempty"`
+	ShareURL string `json:"shareUrl"`
+	Slug     string `json:"slug"`
+	JobID    string `json:"jobId"`
+	Status   string `json:"status"`
 }
 
-type completeUploadRequest struct {
-	UploadToken string `json:"uploadToken"`
-}
-
-type completeUploadResponse struct {
-	ObjectKey string `json:"objectKey"`
-	SHA256    string `json:"sha256"`
-	PublicURL string `json:"publicUrl"`
-	B2URL     string `json:"b2Url"`
-	Verified  bool   `json:"verified"`
-	Size      int64  `json:"size,omitempty"`
-	ETag      string `json:"etag,omitempty"`
+type uploadStatusResponse struct {
+	JobID           string `json:"jobId"`
+	Status          string `json:"status"`
+	Profile         string `json:"profile"`
+	Slug            string `json:"slug"`
+	ShareURL        string `json:"shareUrl"`
+	TargetSHA256    string `json:"targetSha256,omitempty"`
+	TargetObjectKey string `json:"targetObjectKey,omitempty"`
+	Error           string `json:"error,omitempty"`
 }
 
 type listSharesResponse struct {
 	Shares []ShareAlias `json:"shares"`
-}
-
-type createProcessingJobRequest struct {
-	Profile string `json:"profile"`
-}
-
-type processingJobResponse struct {
-	JobID           string `json:"jobId"`
-	Status          string `json:"status"`
-	Profile         string `json:"profile"`
-	AliasSlug       string `json:"aliasSlug"`
-	SourceSHA256    string `json:"sourceSha256"`
-	SourceObjectKey string `json:"sourceObjectKey,omitempty"`
-	TargetSHA256    string `json:"targetSha256,omitempty"`
-	TargetObjectKey string `json:"targetObjectKey,omitempty"`
-	Error           string `json:"error,omitempty"`
 }
 
 func NewServer(cfg Config, auth Authenticator, store ObjectStore, metadata MetadataStore, logger *slog.Logger) *Server {
@@ -99,10 +69,9 @@ func NewServerWithLogin(cfg Config, auth Authenticator, login *OIDCLogin, store 
 	server.mux.HandleFunc("/auth/logout", server.handleLogout)
 	server.mux.HandleFunc("/api/session", server.handleSession)
 	server.mux.HandleFunc("/api/uploads", server.handleCreateUpload)
-	server.mux.HandleFunc("/api/uploads/complete", server.handleCompleteUpload)
+	server.mux.HandleFunc("/api/uploads/", server.handleUploadStatus)
 	server.mux.HandleFunc("/api/shares", server.handleListShares)
 	server.mux.HandleFunc("/api/shares/", server.handleShare)
-	server.mux.HandleFunc("/api/processing-jobs/", server.handleProcessingJob)
 	server.mux.HandleFunc("/share-target", server.handleShareTargetFallback)
 	server.registerWebRoutes()
 	return server
@@ -146,10 +115,23 @@ func (s *Server) handlePublicShare(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	if err := s.metadata.RecordAliasRedirect(r.Context(), slug); err != nil {
-		s.logger.Warn("failed to record share redirect", "slug", slug, "error", err)
+	switch alias.Status {
+	case AliasStatusPending:
+		writeShareStatusPage(w, r, http.StatusAccepted, "Processing", "This share is still being prepared.")
+	case AliasStatusFailed:
+		writeShareStatusPage(w, r, http.StatusServiceUnavailable, "Unavailable", "This share could not be prepared.")
+	case AliasStatusReady, "":
+		if alias.ObjectKey == "" {
+			writeShareStatusPage(w, r, http.StatusAccepted, "Processing", "This share is still being prepared.")
+			return
+		}
+		if err := s.metadata.RecordAliasRedirect(r.Context(), slug); err != nil {
+			s.logger.Warn("failed to record share redirect", "slug", slug, "error", err)
+		}
+		http.Redirect(w, r, PublicURL(s.cfg.B2PublicBaseURL, alias.ObjectKey), http.StatusFound)
+	default:
+		writeShareStatusPage(w, r, http.StatusAccepted, "Processing", "This share is still being prepared.")
 	}
-	http.Redirect(w, r, PublicURL(s.cfg.B2PublicBaseURL, alias.ObjectKey), http.StatusFound)
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
@@ -216,121 +198,91 @@ func (s *Server) handleCreateUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var request createUploadRequest
-	if err := decodeJSONBody(w, r, &request); err != nil {
+	r.Body = http.MaxBytesReader(w, r.Body, s.cfg.MaxUploadBytes+16<<20)
+	if err := r.ParseMultipartForm(16 << 20); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "multipart file upload is required")
 		return
 	}
-	request.Filename = strings.TrimSpace(request.Filename)
-	request.ContentType = strings.TrimSpace(request.ContentType)
-	if request.ContentType == "" {
-		request.ContentType = "application/octet-stream"
-	}
-	if request.Filename == "" {
-		writeJSONError(w, http.StatusBadRequest, "filename is required")
-		return
-	}
-	sha256Hex, sha256Bytes, err := NormalizeSHA256(request.SHA256)
+	file, header, err := r.FormFile("file")
 	if err != nil {
-		writeJSONError(w, http.StatusBadRequest, "sha256 is required")
+		writeJSONError(w, http.StatusBadRequest, "file is required")
 		return
 	}
-	if request.Size <= 0 {
-		writeJSONError(w, http.StatusBadRequest, "size must be positive")
-		return
-	}
-	if request.Size > s.cfg.MaxUploadBytes {
-		writeJSONError(w, http.StatusRequestEntityTooLarge, "file is larger than the configured maximum")
-		return
-	}
+	defer file.Close()
 
-	now := s.cfg.Clock().UTC()
-	extension := ExtensionFor(request.Filename, request.ContentType)
-	objectKey := GenerateObjectKey(s.cfg.ObjectPrefix, sha256Hex, extension)
-	displayFilename := SanitizeFilename(request.Filename)
-	aliasSlug := GenerateAliasSlug(s.cfg.AliasHMACKey, sha256Bytes, extension)
-	if strings.TrimSpace(request.Alias) != "" {
-		aliasSlug = NormalizeManualAlias(request.Alias, extension)
+	filename := SanitizeFilename(header.Filename)
+	contentType := strings.TrimSpace(header.Header.Get("Content-Type"))
+	if contentType == "" {
+		contentType = "application/octet-stream"
 	}
-	publicURL := ShareURL(s.cfg.PublicBaseURL, aliasSlug)
-	b2URL := PublicURL(s.cfg.B2PublicBaseURL, objectKey)
-
-	if object, found, err := s.metadata.GetObject(r.Context(), sha256Hex); err != nil {
-		s.logger.Error("failed to look up object metadata", "sha256", sha256Hex, "error", err)
-		writeJSONError(w, http.StatusInternalServerError, "failed to look up object")
-		return
-	} else if found {
-		targetObject := object
-		processingProfile := ""
-		if derivative, derivativeFound, err := s.metadata.GetDerivedObject(r.Context(), object.SHA256, ProcessingProfileMP4FaststartRemux); err != nil {
-			s.logger.Error("failed to look up derived object metadata", "sha256", sha256Hex, "profile", ProcessingProfileMP4FaststartRemux, "error", err)
-			writeJSONError(w, http.StatusInternalServerError, "failed to look up object")
-			return
-		} else if derivativeFound {
-			targetObject = derivative
-			processingProfile = ProcessingProfileMP4FaststartRemux
-		}
-		if err := s.metadata.UpsertAlias(r.Context(), ShareAlias{
-			Slug:            aliasSlug,
-			ObjectSHA256:    targetObject.SHA256,
-			ObjectKey:       targetObject.ObjectKey,
-			Owner:           authenticated.Principal.Subject,
-			DisplayFilename: displayFilename,
-			Visibility:      "public",
-		}); err != nil {
-			s.logger.Error("failed to record share alias", "slug", aliasSlug, "error", err)
-			writeJSONError(w, http.StatusInternalServerError, "failed to record share alias")
+	finalExtension := ExtensionFor(filename, contentType)
+	profile := ProcessingProfileUploadFinalize
+	if looksLikeVideo(filename, contentType) {
+		finalExtension = ".mp4"
+		contentType = normalizedContentType(contentType)
+		profile = ProcessingProfileMP4Web
+	}
+	slug := ""
+	if manual := strings.TrimSpace(r.FormValue("alias")); manual != "" {
+		slug = NormalizeManualAlias(manual, finalExtension)
+	} else {
+		slug, err = GenerateRandomAliasSlug(filename, finalExtension)
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "failed to create share slug")
 			return
 		}
-		writeJSON(w, http.StatusOK, createUploadResponse{
-			ObjectKey:         targetObject.ObjectKey,
-			PublicURL:         publicURL,
-			B2URL:             PublicURL(s.cfg.B2PublicBaseURL, targetObject.ObjectKey),
-			AlreadyUploaded:   true,
-			SourceSHA256:      object.SHA256,
-			ServedSHA256:      targetObject.SHA256,
-			ProcessingProfile: processingProfile,
-		})
+	}
+	jobID, err := NewProcessingJobID()
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "failed to create upload job")
+		return
+	}
+	stagingPath, size, err := s.stageUpload(jobID, finalExtension, file)
+	if err != nil {
+		if errors.Is(err, errUploadTooLarge) {
+			writeJSONError(w, http.StatusRequestEntityTooLarge, "file is larger than the configured maximum")
+			return
+		}
+		s.logger.Error("failed to stage upload", "error", err)
+		writeJSONError(w, http.StatusInternalServerError, "failed to stage upload")
 		return
 	}
 
-	presigned, err := s.store.PresignPutObject(r.Context(), objectKey, request.ContentType, request.Size, s.cfg.PresignTTL)
-	if err != nil {
-		s.logger.Error("failed to presign upload", "error", err)
-		writeJSONError(w, http.StatusBadGateway, "failed to create upload target")
-		return
+	job := ProcessingJob{
+		ID:              jobID,
+		Owner:           authenticated.Principal.Subject,
+		AliasSlug:       slug,
+		StagingPath:     stagingPath,
+		Profile:         profile,
+		Status:          ProcessingStatusQueued,
+		DisplayFilename: filename,
+		SourceSize:      size,
+		SourceType:      contentType,
 	}
-	uploadToken, err := SignUploadToken(s.cfg.UploadTokenKey, uploadTokenPayload{
-		ObjectKey:       objectKey,
-		SHA256:          sha256Hex,
-		AliasSlug:       aliasSlug,
-		DisplayFilename: displayFilename,
-		ContentType:     request.ContentType,
-		Extension:       extension,
-		Size:            request.Size,
-		Subject:         authenticated.Principal.Subject,
-		ExpiresAt:       now.Add(s.cfg.UploadTokenTTL).Unix(),
+	created, err := s.metadata.CreateIngestJob(r.Context(), job, ShareAlias{
+		Slug:            slug,
+		Owner:           authenticated.Principal.Subject,
+		DisplayFilename: filename,
+		Visibility:      "public",
+		Status:          AliasStatusPending,
 	})
 	if err != nil {
-		s.logger.Error("failed to sign upload token", "error", err)
-		writeJSONError(w, http.StatusInternalServerError, "failed to create upload token")
+		_ = os.Remove(stagingPath)
+		s.logger.Error("failed to create ingest job", "slug", slug, "error", err)
+		writeJSONError(w, http.StatusInternalServerError, "failed to create upload job")
 		return
 	}
-
-	writeJSON(w, http.StatusCreated, createUploadResponse{
-		UploadURL:       presigned.URL,
-		RequiredHeaders: requiredHeaders(presigned.Header),
-		ObjectKey:       objectKey,
-		UploadToken:     uploadToken,
-		PublicURL:       publicURL,
-		B2URL:           b2URL,
-		SourceSHA256:    sha256Hex,
-		ServedSHA256:    sha256Hex,
+	writeJSON(w, http.StatusAccepted, createUploadResponse{
+		ShareURL: ShareURL(s.cfg.PublicBaseURL, slug),
+		Slug:     slug,
+		JobID:    created.ID,
+		Status:   created.Status,
 	})
 }
 
-func (s *Server) handleCompleteUpload(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		w.Header().Set("Allow", "POST")
+func (s *Server) handleUploadStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD")
 		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
@@ -339,69 +291,22 @@ func (s *Server) handleCompleteUpload(w http.ResponseWriter, r *http.Request) {
 		writeAuthError(w, err)
 		return
 	}
-	if err := requireCSRF(authenticated, r); err != nil {
-		writeAuthError(w, err)
+	jobID, ok := slugFromEscapedPath(r.URL.EscapedPath(), "/api/uploads/")
+	if !ok || jobID == "complete" {
+		http.NotFound(w, r)
 		return
 	}
-
-	var request completeUploadRequest
-	if err := decodeJSONBody(w, r, &request); err != nil {
-		return
-	}
-	payload, err := VerifyUploadToken(s.cfg.UploadTokenKey, request.UploadToken, s.cfg.Clock().UTC())
+	job, found, err := s.metadata.GetProcessingJob(r.Context(), jobID, authenticated.Principal.Subject)
 	if err != nil {
-		writeJSONError(w, http.StatusBadRequest, "invalid upload token")
+		s.logger.Error("failed to get upload job", "jobID", jobID, "error", err)
+		writeJSONError(w, http.StatusInternalServerError, "failed to get upload job")
 		return
 	}
-	if payload.Subject != authenticated.Principal.Subject {
-		writeJSONError(w, http.StatusForbidden, "upload token does not belong to this principal")
+	if !found {
+		http.NotFound(w, r)
 		return
 	}
-
-	response := completeUploadResponse{
-		ObjectKey: payload.ObjectKey,
-		SHA256:    payload.SHA256,
-		PublicURL: ShareURL(s.cfg.PublicBaseURL, payload.AliasSlug),
-		B2URL:     PublicURL(s.cfg.B2PublicBaseURL, payload.ObjectKey),
-	}
-	metadata, err := s.store.HeadObject(r.Context(), payload.ObjectKey)
-	if err != nil {
-		s.logger.Warn("uploaded object was not verified by HEAD", "objectKey", payload.ObjectKey, "error", err)
-		writeJSONError(w, http.StatusBadGateway, "failed to verify uploaded object")
-		return
-	}
-	if metadata.ContentLength > 0 && metadata.ContentLength != payload.Size {
-		writeJSONError(w, http.StatusBadGateway, "uploaded object size did not match")
-		return
-	}
-	contentType := payload.ContentType
-	if strings.TrimSpace(metadata.ContentType) != "" {
-		contentType = metadata.ContentType
-	}
-	if err := s.metadata.UpsertObjectAndAlias(r.Context(), StoredObject{
-		SHA256:        payload.SHA256,
-		ObjectKey:     payload.ObjectKey,
-		Size:          payload.Size,
-		ContentType:   contentType,
-		Extension:     payload.Extension,
-		FirstFilename: payload.DisplayFilename,
-		Uploader:      authenticated.Principal.Subject,
-	}, ShareAlias{
-		Slug:            payload.AliasSlug,
-		ObjectSHA256:    payload.SHA256,
-		ObjectKey:       payload.ObjectKey,
-		Owner:           authenticated.Principal.Subject,
-		DisplayFilename: payload.DisplayFilename,
-		Visibility:      "public",
-	}); err != nil {
-		s.logger.Error("failed to record uploaded object", "objectKey", payload.ObjectKey, "error", err)
-		writeJSONError(w, http.StatusInternalServerError, "failed to record uploaded object")
-		return
-	}
-	response.Verified = true
-	response.Size = metadata.ContentLength
-	response.ETag = metadata.ETag
-	writeJSON(w, http.StatusOK, response)
+	writeJSON(w, http.StatusOK, uploadStatusResponseFromJob(s.cfg, job))
 }
 
 func (s *Server) handleListShares(w http.ResponseWriter, r *http.Request) {
@@ -423,16 +328,14 @@ func (s *Server) handleListShares(w http.ResponseWriter, r *http.Request) {
 	}
 	for index := range aliases {
 		aliases[index].PublicURL = ShareURL(s.cfg.PublicBaseURL, aliases[index].Slug)
-		aliases[index].B2URL = PublicURL(s.cfg.B2PublicBaseURL, aliases[index].ObjectKey)
+		if aliases[index].ObjectKey != "" {
+			aliases[index].B2URL = PublicURL(s.cfg.B2PublicBaseURL, aliases[index].ObjectKey)
+		}
 	}
 	writeJSON(w, http.StatusOK, listSharesResponse{Shares: aliases})
 }
 
 func (s *Server) handleShare(w http.ResponseWriter, r *http.Request) {
-	if slug, ok := shareProcessingSlugFromPath(r.URL.EscapedPath()); ok {
-		s.handleCreateProcessingJob(w, r, slug)
-		return
-	}
 	if r.Method != http.MethodDelete {
 		w.Header().Set("Allow", "DELETE")
 		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -452,89 +355,27 @@ func (s *Server) handleShare(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	deleted, err := s.metadata.DeleteAlias(r.Context(), slug, authenticated.Principal.Subject)
+	deleted, found, err := s.metadata.DeleteAlias(r.Context(), slug, authenticated.Principal.Subject)
 	if err != nil {
 		s.logger.Error("failed to delete share alias", "slug", slug, "error", err)
 		writeJSONError(w, http.StatusInternalServerError, "failed to delete share")
 		return
 	}
-	if !deleted {
+	if !found {
 		http.NotFound(w, r)
 		return
+	}
+	for _, stagingPath := range deleted.StagingPaths {
+		if err := os.Remove(stagingPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			s.logger.Warn("failed to remove staged upload", "path", stagingPath, "error", err)
+		}
+	}
+	if deleted.ObjectKey != "" {
+		if err := s.store.DeleteObject(r.Context(), deleted.ObjectKey); err != nil {
+			s.logger.Warn("failed to delete unreferenced B2 object", "objectKey", deleted.ObjectKey, "error", err)
+		}
 	}
 	w.WriteHeader(http.StatusNoContent)
-}
-
-func (s *Server) handleCreateProcessingJob(w http.ResponseWriter, r *http.Request, slug string) {
-	if r.Method != http.MethodPost {
-		w.Header().Set("Allow", "POST")
-		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-	authenticated, err := s.auth.Authenticate(r)
-	if err != nil {
-		writeAuthError(w, err)
-		return
-	}
-	if err := requireCSRF(authenticated, r); err != nil {
-		writeAuthError(w, err)
-		return
-	}
-	var request createProcessingJobRequest
-	if err := decodeJSONBody(w, r, &request); err != nil {
-		return
-	}
-	request.Profile = strings.TrimSpace(request.Profile)
-	if err := ValidateProcessingProfile(request.Profile); err != nil {
-		writeJSONError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	jobID, err := NewProcessingJobID()
-	if err != nil {
-		s.logger.Error("failed to create processing job id", "error", err)
-		writeJSONError(w, http.StatusInternalServerError, "failed to create processing job")
-		return
-	}
-	job, found, err := s.metadata.CreateProcessingJob(r.Context(), jobID, slug, authenticated.Principal.Subject, request.Profile)
-	if err != nil {
-		s.logger.Error("failed to create processing job", "slug", slug, "profile", request.Profile, "error", err)
-		writeJSONError(w, http.StatusInternalServerError, "failed to create processing job")
-		return
-	}
-	if !found {
-		http.NotFound(w, r)
-		return
-	}
-	writeJSON(w, http.StatusAccepted, processingJobResponseFromJob(job))
-}
-
-func (s *Server) handleProcessingJob(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		w.Header().Set("Allow", "GET, HEAD")
-		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-	authenticated, err := s.auth.Authenticate(r)
-	if err != nil {
-		writeAuthError(w, err)
-		return
-	}
-	jobID, ok := slugFromEscapedPath(r.URL.EscapedPath(), "/api/processing-jobs/")
-	if !ok {
-		http.NotFound(w, r)
-		return
-	}
-	job, found, err := s.metadata.GetProcessingJob(r.Context(), jobID, authenticated.Principal.Subject)
-	if err != nil {
-		s.logger.Error("failed to get processing job", "jobID", jobID, "error", err)
-		writeJSONError(w, http.StatusInternalServerError, "failed to get processing job")
-		return
-	}
-	if !found {
-		http.NotFound(w, r)
-		return
-	}
-	writeJSON(w, http.StatusOK, processingJobResponseFromJob(job))
 }
 
 func (s *Server) handleShareTargetFallback(w http.ResponseWriter, r *http.Request) {
@@ -550,25 +391,54 @@ func (s *Server) handleShareTargetFallback(w http.ResponseWriter, r *http.Reques
 	writeJSONError(w, http.StatusBadRequest, "install the web app before using it as a share target")
 }
 
-func shareSlugFromPath(escapedPath string) (string, bool) {
-	return slugFromEscapedPath(escapedPath, "/s/")
+var errUploadTooLarge = errors.New("upload too large")
+
+func (s *Server) stageUpload(jobID, extension string, reader io.Reader) (string, int64, error) {
+	if err := os.MkdirAll(s.cfg.StagingDir, 0o700); err != nil {
+		return "", 0, err
+	}
+	name := safeFilename(jobID) + extension + ".upload"
+	path := filepath.Join(s.cfg.StagingDir, name)
+	tempPath := path + ".tmp"
+	output, err := os.OpenFile(tempPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	if err != nil {
+		return "", 0, err
+	}
+	limited := &limitedWriter{Writer: output, Limit: s.cfg.MaxUploadBytes}
+	_, copyErr := io.Copy(limited, reader)
+	closeErr := output.Close()
+	if copyErr != nil {
+		_ = os.Remove(tempPath)
+		return "", 0, copyErr
+	}
+	if closeErr != nil {
+		_ = os.Remove(tempPath)
+		return "", 0, closeErr
+	}
+	if err := os.Rename(tempPath, path); err != nil {
+		_ = os.Remove(tempPath)
+		return "", 0, err
+	}
+	return path, limited.Written, nil
 }
 
-func shareProcessingSlugFromPath(escapedPath string) (string, bool) {
-	const prefix = "/api/shares/"
-	const suffix = "/processing-jobs"
-	if !strings.HasPrefix(escapedPath, prefix) || !strings.HasSuffix(escapedPath, suffix) {
-		return "", false
+type limitedWriter struct {
+	Writer  io.Writer
+	Limit   int64
+	Written int64
+}
+
+func (w *limitedWriter) Write(data []byte) (int, error) {
+	if w.Written+int64(len(data)) > w.Limit {
+		return 0, errUploadTooLarge
 	}
-	escapedSlug := strings.TrimSuffix(strings.TrimPrefix(escapedPath, prefix), suffix)
-	if escapedSlug == "" || strings.Contains(escapedSlug, "/") {
-		return "", false
-	}
-	slug, err := url.PathUnescape(escapedSlug)
-	if err != nil || slug == "" || strings.Contains(slug, "/") {
-		return "", false
-	}
-	return slug, true
+	n, err := w.Writer.Write(data)
+	w.Written += int64(n)
+	return n, err
+}
+
+func shareSlugFromPath(escapedPath string) (string, bool) {
+	return slugFromEscapedPath(escapedPath, "/s/")
 }
 
 func slugFromEscapedPath(escapedPath, prefix string) (string, bool) {
@@ -601,17 +471,6 @@ func decodeJSONBody(w http.ResponseWriter, r *http.Request, target any) error {
 	return nil
 }
 
-func requiredHeaders(header http.Header) map[string]string {
-	result := map[string]string{}
-	for name, values := range header {
-		if len(values) == 0 || strings.EqualFold(name, "host") {
-			continue
-		}
-		result[http.CanonicalHeaderKey(name)] = values[0]
-	}
-	return result
-}
-
 func writeJSON(w http.ResponseWriter, statusCode int, payload any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
@@ -622,16 +481,49 @@ func writeJSONError(w http.ResponseWriter, statusCode int, message string) {
 	writeJSON(w, statusCode, map[string]string{"error": message})
 }
 
-func processingJobResponseFromJob(job ProcessingJob) processingJobResponse {
-	return processingJobResponse{
+func writeShareStatusPage(w http.ResponseWriter, r *http.Request, statusCode int, title, message string) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(statusCode)
+	if r.Method == http.MethodHead {
+		return
+	}
+	_, _ = fmt.Fprintf(w, "<!doctype html><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>%s</title><body><main><h1>%s</h1><p>%s</p></main></body>", htmlEscape(title), htmlEscape(title), htmlEscape(message))
+}
+
+func htmlEscape(value string) string {
+	replacer := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&quot;")
+	return replacer.Replace(value)
+}
+
+func uploadStatusResponseFromJob(cfg Config, job ProcessingJob) uploadStatusResponse {
+	return uploadStatusResponse{
 		JobID:           job.ID,
 		Status:          job.Status,
 		Profile:         job.Profile,
-		AliasSlug:       job.AliasSlug,
-		SourceSHA256:    job.SourceSHA256,
-		SourceObjectKey: job.SourceObjectKey,
+		Slug:            job.AliasSlug,
+		ShareURL:        ShareURL(cfg.PublicBaseURL, job.AliasSlug),
 		TargetSHA256:    job.TargetSHA256,
 		TargetObjectKey: job.TargetObjectKey,
 		Error:           job.Error,
 	}
+}
+
+func looksLikeVideo(filename, contentType string) bool {
+	contentType = strings.ToLower(strings.TrimSpace(strings.Split(contentType, ";")[0]))
+	name := strings.ToLower(filename)
+	return strings.HasPrefix(contentType, "video/") ||
+		strings.HasSuffix(name, ".mp4") ||
+		strings.HasSuffix(name, ".m4v") ||
+		strings.HasSuffix(name, ".mov") ||
+		strings.HasSuffix(name, ".mkv") ||
+		strings.HasSuffix(name, ".webm") ||
+		strings.HasSuffix(name, ".avi")
+}
+
+func normalizedContentType(contentType string) string {
+	if looksLikeVideo("", contentType) {
+		return contentType
+	}
+	return "application/octet-stream"
 }

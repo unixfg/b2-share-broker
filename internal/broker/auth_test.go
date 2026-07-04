@@ -8,7 +8,7 @@ import (
 )
 
 func TestSessionManagerCreatesAndReadsSession(t *testing.T) {
-	cfg := testConfig()
+	cfg := testConfig(t)
 	manager := NewSessionManager(cfg)
 	recorder := httptest.NewRecorder()
 
@@ -40,7 +40,7 @@ func TestSessionManagerCreatesAndReadsSession(t *testing.T) {
 }
 
 func TestSessionManagerRejectsExpiredSession(t *testing.T) {
-	cfg := testConfig()
+	cfg := testConfig(t)
 	now := cfg.Clock()
 	cfg.Clock = func() time.Time { return now }
 	manager := NewSessionManager(cfg)
@@ -61,13 +61,43 @@ func TestSessionManagerRejectsExpiredSession(t *testing.T) {
 
 func TestRequireCSRF(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "/api/uploads", nil)
-	authenticated := AuthenticatedRequest{CSRFToken: "csrf-token"}
+	authenticated := AuthenticatedRequest{CSRFToken: "csrf-token", RequiresCSRF: true}
 	if err := requireCSRF(authenticated, request); err == nil {
 		t.Fatal("expected missing CSRF error")
 	}
 	request.Header.Set(csrfHeaderName, "csrf-token")
 	if err := requireCSRF(authenticated, request); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestRequireCSRFSkipsBearerRequests(t *testing.T) {
+	request := httptest.NewRequest(http.MethodPost, "/api/uploads", nil)
+	authenticated := AuthenticatedRequest{CSRFToken: "csrf-token", RequiresCSRF: false}
+	if err := requireCSRF(authenticated, request); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRoleAuthorizerAllowsRealmOrClientRole(t *testing.T) {
+	authorizer := newRoleAuthorizer([]string{"b2-share-user"})
+	var realmClaims keycloakClaims
+	realmClaims.RealmAccess.Roles = []string{"b2-share-user"}
+	if !authorizer.Allows(realmClaims, "b2-share-web") {
+		t.Fatal("expected realm role to authorize")
+	}
+
+	var clientClaims keycloakClaims
+	clientClaims.ResourceAccess = map[string]struct {
+		Roles []string `json:"roles"`
+	}{
+		"b2-share-web": {Roles: []string{"b2-share-user"}},
+	}
+	if !authorizer.Allows(clientClaims, "b2-share-web") {
+		t.Fatal("expected client role to authorize")
+	}
+	if authorizer.Allows(clientClaims, "other-client") {
+		t.Fatal("expected role on another client to be ignored")
 	}
 }
 

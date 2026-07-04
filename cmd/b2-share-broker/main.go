@@ -24,7 +24,13 @@ func main() {
 	defer cancel()
 
 	sessions := broker.NewSessionManager(cfg)
-	auth := broker.NewSessionAuthenticator(sessions)
+	sessionAuth := broker.NewSessionAuthenticator(sessions)
+	bearerAuth, err := broker.NewBearerAuthenticator(ctx, cfg)
+	if err != nil {
+		logger.Error("bearer oidc setup failed", "error", err)
+		os.Exit(1)
+	}
+	auth := broker.NewCombinedAuthenticator(sessionAuth, bearerAuth)
 	login, err := broker.NewOIDCLogin(ctx, cfg, sessions)
 	if err != nil {
 		logger.Error("oidc setup failed", "error", err)

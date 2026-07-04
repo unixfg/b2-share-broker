@@ -2,16 +2,10 @@ const DB_NAME = "b2-share-pwa";
 const DB_VERSION = 1;
 const STORE_NAME = "pending";
 const PENDING_KEY = "current";
-const MEDIA_ANALYSIS_BYTES = 2 * 1024 * 1024;
-const VIDEO_ACTIONS = Object.freeze([
-  { kind: "remux", status: "available", profile: "mp4-faststart-remux" },
-  { kind: "transcode", status: "deferred", requires: "gpu-capacity" }
-]);
 
 const state = {
   session: { authenticated: false },
   file: null,
-  mediaPlan: null,
   processingJob: null,
   processingPoll: 0,
   publicUrl: "",
@@ -168,27 +162,9 @@ async function loadPendingShare() {
 function setFile(file) {
   clearProcessingPoll();
   state.file = file;
-  state.mediaPlan = null;
   state.processingJob = null;
   state.publicUrl = "";
   render();
-  if (!file) {
-    return;
-  }
-  inspectMediaPlan(file)
-    .then((plan) => {
-      if (state.file !== file) {
-        return;
-      }
-      state.mediaPlan = plan;
-      render();
-    })
-    .catch(() => {
-      if (state.file === file) {
-        state.mediaPlan = null;
-        render();
-      }
-    });
 }
 
 function render() {
@@ -218,30 +194,7 @@ function setStatus(message, isError = false) {
 
 function renderMediaWarning() {
   els.mediaWarning.textContent = "";
-  const warning = state.mediaPlan && state.mediaPlan.warning ? state.mediaPlan.warning : "";
-  els.mediaWarning.classList.toggle("hidden", !warning);
-  if (!warning) {
-    return;
-  }
-
-  const text = document.createElement("span");
-  text.textContent = warning;
-  els.mediaWarning.append(text);
-
-  const remuxAction = (state.mediaPlan.actions || []).find((action) => action.kind === "remux" && action.status === "available");
-  if (!remuxAction || !state.publicUrl) {
-    return;
-  }
-
-  const job = state.processingJob;
-  const isBusy = job && (job.status === "queued" || job.status === "running");
-  const button = document.createElement("button");
-  button.className = "button secondary compact";
-  button.type = "button";
-  button.textContent = isBusy ? formatProcessingStatus(job.status) : "Remux";
-  button.disabled = isBusy;
-  button.addEventListener("click", () => startProcessingJob(remuxAction.profile));
-  els.mediaWarning.append(button);
+  els.mediaWarning.classList.add("hidden");
 }
 
 async function uploadSelectedFile() {
@@ -262,54 +215,24 @@ async function uploadSelectedFile() {
     return;
   }
   try {
-    setStatus("Hashing");
+    setStatus("Uploading");
     els.uploadButton.disabled = true;
-    const sha256 = await sha256File(file);
-    setStatus("Creating upload");
     const alias = els.aliasInput.value.trim();
+    const form = new FormData();
+    form.append("file", file, file.name || "upload");
+    if (alias) {
+      form.append("alias", alias);
+    }
     const createResponse = await apiFetch("/api/uploads", {
       method: "POST",
-      body: JSON.stringify({
-        filename: file.name || "upload",
-        contentType: file.type || "application/octet-stream",
-        size: file.size,
-        sha256,
-        ...(alias ? { alias } : {})
-      })
+      body: form
     });
-    if (createResponse.alreadyUploaded) {
-      state.publicUrl = createResponse.publicUrl;
-      if (usesProcessedObject(createResponse, sha256)) {
-        state.mediaPlan = null;
-      }
-      await clearPending();
-      await loadShares();
-      setStatus("Uploaded");
-      return;
-    }
-    setStatus("Uploading");
-    const uploadHeaders = new Headers(createResponse.requiredHeaders || {});
-    if (!uploadHeaders.has("Content-Type")) {
-      uploadHeaders.set("Content-Type", file.type || "application/octet-stream");
-    }
-    const uploadResponse = await fetch(createResponse.uploadUrl, {
-      method: "PUT",
-      headers: uploadHeaders,
-      body: file,
-      mode: "cors"
-    });
-    if (!uploadResponse.ok) {
-      throw new Error(`B2 upload failed with ${uploadResponse.status}`);
-    }
-    setStatus("Verifying");
-    const completeResponse = await apiFetch("/api/uploads/complete", {
-      method: "POST",
-      body: JSON.stringify({ uploadToken: createResponse.uploadToken })
-    });
-    state.publicUrl = completeResponse.publicUrl;
+    state.publicUrl = createResponse.shareUrl;
+    state.processingJob = createResponse;
     await clearPending();
     await loadShares();
-    setStatus(completeResponse.verified ? "Uploaded" : "Uploaded, verification pending");
+    setStatus(formatProcessingStatus(createResponse.status));
+    pollUploadJob(createResponse.jobId);
   } catch (error) {
     setStatus(error.message || "Upload failed.", true);
   } finally {
@@ -318,15 +241,16 @@ async function uploadSelectedFile() {
 }
 
 async function apiFetch(url, options = {}) {
+  const headers = new Headers(options.headers || {});
+  headers.set("Accept", "application/json");
+  headers.set("X-CSRF-Token", state.session.csrfToken || "");
+  if (!(options.body instanceof FormData) && !headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
+  }
   const response = await fetch(url, {
     credentials: "same-origin",
     ...options,
-    headers: {
-      "Accept": "application/json",
-      "Content-Type": "application/json",
-      "X-CSRF-Token": state.session.csrfToken || "",
-      ...(options.headers || {})
-    }
+    headers
   });
   if (response.status === 401) {
     location.assign(`/auth/login?return_to=${encodeURIComponent("/share")}`);
@@ -337,15 +261,6 @@ async function apiFetch(url, options = {}) {
     throw new Error(body.error || `Request failed with ${response.status}`);
   }
   return body;
-}
-
-async function sha256File(file) {
-  if (!crypto.subtle) {
-    throw new Error("SHA-256 is not available in this browser.");
-  }
-  const buffer = await file.arrayBuffer();
-  const digest = await crypto.subtle.digest("SHA-256", buffer);
-  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 function renderShares() {
@@ -364,8 +279,9 @@ function renderShares() {
     const meta = document.createElement("div");
     meta.className = "history-meta";
     meta.append(
-      historySpan(formatBytes(share.size)),
-      historySpan(share.contentType || "application/octet-stream"),
+      historySpan(formatShareStatus(share.status)),
+      historySpan(share.size ? formatBytes(share.size) : "Processing"),
+      historySpan(share.contentType || ""),
       historySpan(`${share.redirectCount || 0} opens`),
       historySpan(formatDate(share.updatedAt))
     );
@@ -441,72 +357,39 @@ async function deleteShare(share) {
   }
 }
 
-async function inspectMediaPlan(file) {
-  if (!looksLikeMP4(file)) {
-    return null;
-  }
-  const sample = await file.slice(0, Math.min(file.size, MEDIA_ANALYSIS_BYTES)).arrayBuffer();
-  const boxes = parseMP4TopLevelBoxes(sample);
-  const mdat = boxes.find((box) => box.type === "mdat");
-  const moov = boxes.find((box) => box.type === "moov");
-  if (mdat && (!moov || mdat.offset < moov.offset)) {
-    return {
-      kind: "video/mp4",
-      status: "warning",
-      code: "mp4_moov_after_mdat",
-      warning: "MP4 metadata is at the end; inline players may stall until it is remuxed.",
-      actions: VIDEO_ACTIONS
-    };
-  }
-  return null;
-}
-
-async function startProcessingJob(profile) {
-  const slug = slugFromShareURL(state.publicUrl);
-  if (!slug) {
-    setStatus("Share URL is missing.", true);
-    return;
-  }
-  try {
-    setStatus("Queueing remux");
-    const job = await apiFetch(`/api/shares/${encodeURIComponent(slug)}/processing-jobs`, {
-      method: "POST",
-      body: JSON.stringify({ profile })
-    });
-    state.processingJob = job;
-    render();
-    pollProcessingJob(job.jobId);
-  } catch (error) {
-    setStatus(error.message || "Remux failed to start.", true);
-  }
-}
-
-async function pollProcessingJob(jobId) {
+async function pollUploadJob(jobId) {
   clearProcessingPoll();
   if (!jobId) {
     return;
   }
   try {
-    const job = await apiFetch(`/api/processing-jobs/${encodeURIComponent(jobId)}`, { method: "GET" });
+    const job = await apiFetch(`/api/uploads/${encodeURIComponent(jobId)}`, { method: "GET" });
     state.processingJob = job;
+    state.publicUrl = job.shareUrl || state.publicUrl;
     if (job.status === "completed") {
-      state.mediaPlan = null;
       state.processingJob = null;
       await loadShares();
-      setStatus("Remuxed");
+      setStatus("Uploaded");
       render();
       return;
     }
     if (job.status === "failed") {
-      setStatus(job.error || "Remux failed.", true);
+      await loadShares();
+      setStatus(job.error || "Processing failed.", true);
+      render();
+      return;
+    }
+    if (job.status === "canceled") {
+      await loadShares();
+      setStatus("Canceled", true);
       render();
       return;
     }
     setStatus(formatProcessingStatus(job.status));
     render();
-    state.processingPoll = window.setTimeout(() => pollProcessingJob(jobId), 2500);
+    state.processingPoll = window.setTimeout(() => pollUploadJob(jobId), 2500);
   } catch (error) {
-    setStatus(error.message || "Remux status unavailable.", true);
+    setStatus(error.message || "Upload status unavailable.", true);
     render();
   }
 }
@@ -521,83 +404,31 @@ function clearProcessingPoll() {
 function formatProcessingStatus(status) {
   switch (status) {
     case "queued":
-      return "Remux queued";
+      return "Queued";
     case "running":
-      return "Remuxing";
+      return "Processing";
     case "completed":
-      return "Remuxed";
+      return "Uploaded";
     case "failed":
-      return "Remux failed";
+      return "Failed";
+    case "canceled":
+      return "Canceled";
     default:
-      return "Remux";
+      return "Processing";
   }
 }
 
-function slugFromShareURL(value) {
-  if (!value) {
-    return "";
+function formatShareStatus(status) {
+  switch (status) {
+    case "ready":
+      return "Ready";
+    case "failed":
+      return "Failed";
+    case "pending":
+    case "":
+    default:
+      return "Processing";
   }
-  try {
-    const parsed = new URL(value, location.origin);
-    if (parsed.origin !== location.origin || !parsed.pathname.startsWith("/s/")) {
-      return "";
-    }
-    const slug = decodeURIComponent(parsed.pathname.slice(3));
-    return slug && !slug.includes("/") ? slug : "";
-  } catch (error) {
-    return "";
-  }
-}
-
-function usesProcessedObject(response, sourceSHA256) {
-  const source = (response.sourceSha256 || sourceSHA256 || "").toLowerCase();
-  const served = (response.servedSha256 || "").toLowerCase();
-  return Boolean(response.processingProfile) || (source && served && source !== served);
-}
-
-function looksLikeMP4(file) {
-  const name = (file.name || "").toLowerCase();
-  return file.type === "video/mp4" || name.endsWith(".mp4") || name.endsWith(".m4v");
-}
-
-function parseMP4TopLevelBoxes(buffer) {
-  const view = new DataView(buffer);
-  const boxes = [];
-  let offset = 0;
-  while (offset + 8 <= view.byteLength) {
-    let size = view.getUint32(offset);
-    const type = readBoxType(view, offset + 4);
-    let headerSize = 8;
-    if (size === 1 && offset + 16 <= view.byteLength) {
-      const high = view.getUint32(offset + 8);
-      const low = view.getUint32(offset + 12);
-      size = high * 2 ** 32 + low;
-      headerSize = 16;
-    } else if (size === 0) {
-      size = view.byteLength - offset;
-    }
-    if (!type || size < headerSize) {
-      break;
-    }
-    boxes.push({ type, offset, size });
-    if (offset + size > view.byteLength) {
-      break;
-    }
-    offset += size;
-  }
-  return boxes;
-}
-
-function readBoxType(view, offset) {
-  let value = "";
-  for (let index = 0; index < 4; index += 1) {
-    const code = view.getUint8(offset + index);
-    if (code < 32 || code > 126) {
-      return "";
-    }
-    value += String.fromCharCode(code);
-  }
-  return value;
 }
 
 function formatBytes(bytes) {

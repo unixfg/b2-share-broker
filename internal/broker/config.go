@@ -12,15 +12,13 @@ import (
 )
 
 const (
-	defaultListenAddr      = ":8080"
-	defaultRegion          = "us-west-004"
-	defaultMaxUploadBytes  = int64(512 * 1024 * 1024)
-	defaultObjectPrefix    = "s"
-	defaultPresignTTL      = 15 * time.Minute
-	defaultUploadTokenTTL  = time.Hour
-	defaultSessionTTL      = 12 * time.Hour
-	defaultTranscoderPoll  = 5 * time.Second
-	minUploadTokenKeyBytes = 32
+	defaultListenAddr     = ":8080"
+	defaultRegion         = "us-west-004"
+	defaultMaxUploadBytes = int64(512 * 1024 * 1024)
+	defaultRequiredRoles  = "b2-share-user"
+	defaultSessionTTL     = 12 * time.Hour
+	defaultTranscoderPoll = 5 * time.Second
+	minSecretKeyBytes     = 32
 )
 
 type Config struct {
@@ -28,7 +26,8 @@ type Config struct {
 	IssuerURL         string
 	OIDCClientID      string
 	OIDCClientSecret  string
-	AllowedSubjects   []string
+	OIDCAudience      string
+	RequiredRoles     []string
 	B2Endpoint        string
 	B2Region          string
 	B2Bucket          string
@@ -37,17 +36,13 @@ type Config struct {
 	B2AccessKeyID     string
 	B2SecretAccessKey string
 	DatabaseURL       string
-	ObjectPrefix      string
 	MaxUploadBytes    int64
-	PresignTTL        time.Duration
-	UploadTokenTTL    time.Duration
-	UploadTokenKey    []byte
-	AliasHMACKey      []byte
 	SessionTTL        time.Duration
 	SessionAuthKey    []byte
 	FFmpegPath        string
 	TranscoderWorkDir string
 	TranscoderPoll    time.Duration
+	StagingDir        string
 	Clock             func() time.Time
 }
 
@@ -61,15 +56,7 @@ func LoadConfigFromEnv() (Config, error) {
 		}
 	}
 
-	tokenKey, err := parseSecretKey(os.Getenv("UPLOAD_TOKEN_KEY"))
-	if err != nil {
-		return Config{}, err
-	}
 	sessionAuthKey, err := parseSecretKey(os.Getenv("SESSION_AUTH_KEY"))
-	if err != nil {
-		return Config{}, err
-	}
-	aliasHMACKey, err := parseSecretKey(os.Getenv("ALIAS_HMAC_KEY"))
 	if err != nil {
 		return Config{}, err
 	}
@@ -78,9 +65,10 @@ func LoadConfigFromEnv() (Config, error) {
 	cfg := Config{
 		ListenAddr:        listenAddr,
 		IssuerURL:         envString("OIDC_ISSUER_URL", ""),
-		OIDCClientID:      firstEnv("OIDC_CLIENT_ID", "OIDC_AUDIENCE"),
+		OIDCClientID:      envString("OIDC_CLIENT_ID", ""),
 		OIDCClientSecret:  envString("OIDC_CLIENT_SECRET", ""),
-		AllowedSubjects:   envList("OIDC_ALLOWED_SUBJECTS"),
+		OIDCAudience:      firstEnv("OIDC_AUDIENCE", "OIDC_CLIENT_ID"),
+		RequiredRoles:     envListWithDefault("OIDC_REQUIRED_ROLES", defaultRequiredRoles),
 		B2Endpoint:        strings.TrimRight(envString("B2_ENDPOINT", ""), "/"),
 		B2Region:          envString("B2_REGION", defaultRegion),
 		B2Bucket:          envString("B2_BUCKET", ""),
@@ -89,17 +77,13 @@ func LoadConfigFromEnv() (Config, error) {
 		B2AccessKeyID:     firstEnv("AWS_ACCESS_KEY_ID", "ACCESS_KEY_ID"),
 		B2SecretAccessKey: firstEnv("AWS_SECRET_ACCESS_KEY", "ACCESS_SECRET_KEY"),
 		DatabaseURL:       envString("DATABASE_URL", ""),
-		ObjectPrefix:      strings.Trim(envString("OBJECT_PREFIX", defaultObjectPrefix), "/"),
 		MaxUploadBytes:    envInt64("MAX_UPLOAD_BYTES", defaultMaxUploadBytes),
-		PresignTTL:        envDurationSeconds("PRESIGN_TTL_SECONDS", defaultPresignTTL),
-		UploadTokenTTL:    envDurationSeconds("UPLOAD_TOKEN_TTL_SECONDS", defaultUploadTokenTTL),
-		UploadTokenKey:    tokenKey,
-		AliasHMACKey:      aliasHMACKey,
 		SessionTTL:        envDurationSeconds("SESSION_TTL_SECONDS", defaultSessionTTL),
 		SessionAuthKey:    sessionAuthKey,
 		FFmpegPath:        envString("FFMPEG_PATH", "ffmpeg"),
 		TranscoderWorkDir: envString("TRANSCODER_WORK_DIR", "/work"),
 		TranscoderPoll:    envDurationSeconds("TRANSCODER_POLL_SECONDS", defaultTranscoderPoll),
+		StagingDir:        envString("STAGING_DIR", "/staging"),
 		Clock:             time.Now,
 	}
 
@@ -116,6 +100,7 @@ func (c Config) Validate() error {
 
 	require("OIDC_ISSUER_URL", c.IssuerURL)
 	require("OIDC_CLIENT_ID", c.OIDCClientID)
+	require("OIDC_AUDIENCE", c.OIDCAudience)
 	require("OIDC_CLIENT_SECRET", c.OIDCClientSecret)
 	require("B2_ENDPOINT", c.B2Endpoint)
 	require("B2_BUCKET", c.B2Bucket)
@@ -124,17 +109,11 @@ func (c Config) Validate() error {
 	require("AWS_ACCESS_KEY_ID or ACCESS_KEY_ID", c.B2AccessKeyID)
 	require("AWS_SECRET_ACCESS_KEY or ACCESS_SECRET_KEY", c.B2SecretAccessKey)
 	require("DATABASE_URL", c.DatabaseURL)
-	if len(c.UploadTokenKey) < minUploadTokenKeyBytes {
-		missing = append(missing, "UPLOAD_TOKEN_KEY")
-	}
-	if len(c.AliasHMACKey) < minUploadTokenKeyBytes {
-		missing = append(missing, "ALIAS_HMAC_KEY")
-	}
-	if len(c.SessionAuthKey) < minUploadTokenKeyBytes {
+	if len(c.SessionAuthKey) < minSecretKeyBytes {
 		missing = append(missing, "SESSION_AUTH_KEY")
 	}
-	if len(c.AllowedSubjects) == 0 {
-		missing = append(missing, "OIDC_ALLOWED_SUBJECTS")
+	if len(c.RequiredRoles) == 0 {
+		missing = append(missing, "OIDC_REQUIRED_ROLES")
 	}
 	if len(missing) > 0 {
 		return fmt.Errorf("missing required configuration: %s", strings.Join(missing, ", "))
@@ -161,20 +140,14 @@ func (c Config) Validate() error {
 	if c.MaxUploadBytes <= 0 {
 		return errors.New("MAX_UPLOAD_BYTES must be positive")
 	}
-	if c.PresignTTL <= 0 {
-		return errors.New("PRESIGN_TTL_SECONDS must be positive")
-	}
-	if c.UploadTokenTTL <= 0 {
-		return errors.New("UPLOAD_TOKEN_TTL_SECONDS must be positive")
-	}
 	if c.SessionTTL <= 0 {
 		return errors.New("SESSION_TTL_SECONDS must be positive")
 	}
 	if c.TranscoderPoll <= 0 {
 		return errors.New("TRANSCODER_POLL_SECONDS must be positive")
 	}
-	if c.ObjectPrefix == "" {
-		return errors.New("OBJECT_PREFIX must not be empty")
+	if strings.TrimSpace(c.StagingDir) == "" {
+		return errors.New("STAGING_DIR must not be empty")
 	}
 	return nil
 }
@@ -188,7 +161,19 @@ func envString(name, fallback string) string {
 }
 
 func envList(name string) []string {
-	raw := strings.TrimSpace(os.Getenv(name))
+	return parseList(os.Getenv(name))
+}
+
+func envListWithDefault(name, fallback string) []string {
+	raw := os.Getenv(name)
+	if raw == "" {
+		raw = fallback
+	}
+	return parseList(raw)
+}
+
+func parseList(raw string) []string {
+	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return nil
 	}
@@ -245,15 +230,15 @@ func parseSecretKey(raw string) ([]byte, error) {
 		return nil, nil
 	}
 	decoded, err := base64.StdEncoding.DecodeString(raw)
-	if err == nil && len(decoded) >= minUploadTokenKeyBytes {
+	if err == nil && len(decoded) >= minSecretKeyBytes {
 		return decoded, nil
 	}
 	decoded, err = base64.RawURLEncoding.DecodeString(raw)
-	if err == nil && len(decoded) >= minUploadTokenKeyBytes {
+	if err == nil && len(decoded) >= minSecretKeyBytes {
 		return decoded, nil
 	}
-	if len([]byte(raw)) < minUploadTokenKeyBytes {
-		return nil, fmt.Errorf("UPLOAD_TOKEN_KEY must be at least %d bytes or a base64 value that decodes to at least %d bytes", minUploadTokenKeyBytes, minUploadTokenKeyBytes)
+	if len([]byte(raw)) < minSecretKeyBytes {
+		return nil, fmt.Errorf("secret keys must be at least %d bytes or a base64 value that decodes to at least %d bytes", minSecretKeyBytes, minSecretKeyBytes)
 	}
 	return []byte(raw), nil
 }
