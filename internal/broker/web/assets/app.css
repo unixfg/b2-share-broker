@@ -241,6 +241,12 @@ h2 {
   font-weight: 720;
 }
 
+.history-error {
+  overflow-wrap: anywhere;
+  color: var(--warn);
+  font-size: 0.9rem;
+}
+
 .history-meta,
 .history-links,
 .history-actions {

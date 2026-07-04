@@ -274,7 +274,7 @@ function renderShares() {
     meta.className = "history-meta";
     meta.append(
       historySpan(formatShareStatus(share.status)),
-      historySpan(share.size ? formatBytes(share.size) : "Processing"),
+      historySpan(formatShareSize(share)),
       historySpan(share.contentType || ""),
       historySpan(`${share.redirectCount || 0} opens`),
       historySpan(formatDate(share.updatedAt))
@@ -294,12 +294,22 @@ function renderShares() {
     actions.className = "history-actions";
     actions.append(links, deleteButton);
 
-    item.append(title, meta, actions);
+    item.append(title, meta);
+    if (share.error) {
+      const error = document.createElement("div");
+      error.className = "history-error";
+      error.textContent = share.error;
+      item.append(error);
+    }
+    item.append(actions);
     els.historyList.append(item);
   }
 }
 
 function historySpan(value) {
+  if (!value) {
+    return document.createDocumentFragment();
+  }
   const span = document.createElement("span");
   span.textContent = value;
   return span;
@@ -423,6 +433,16 @@ function formatShareStatus(status) {
     default:
       return "Processing";
   }
+}
+
+function formatShareSize(share) {
+  if (share.size) {
+    return formatBytes(share.size);
+  }
+  if (share.status === "pending") {
+    return "Waiting";
+  }
+  return "";
 }
 
 function formatBytes(bytes) {
