@@ -113,6 +113,39 @@ Requires an authenticated browser session. Returns recent aliases owned by the
 current subject with filenames, sizes, content types, redirect counts, share
 URLs, and native B2 URLs.
 
+### `POST /api/shares/{slug}/processing-jobs`
+
+Requires an authenticated browser session and `X-CSRF-Token`. Creates or returns
+an in-flight owner-only processing job for a share alias.
+
+Request:
+
+```json
+{
+  "profile": "mp4-faststart-remux"
+}
+```
+
+Response:
+
+```json
+{
+  "jobId": "9f4e04ba-4a59-4d5b-aa08-74827eea7469",
+  "status": "queued",
+  "profile": "mp4-faststart-remux",
+  "aliasSlug": "hmacalias.mp4",
+  "sourceSha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+}
+```
+
+V1 enables only `mp4-faststart-remux`. The future
+`mp4-h264-aac-discord` profile name is reserved but disabled.
+
+### `GET /api/processing-jobs/{jobId}`
+
+Requires an authenticated browser session. Returns the owner-only processing job
+status. Completed jobs include the target SHA-256/object key.
+
 ## Broker Configuration
 
 Required environment variables:
@@ -146,6 +179,27 @@ Optional environment variables:
 - `UPLOAD_TOKEN_TTL_SECONDS`: defaults to `3600`
 - `SESSION_TTL_SECONDS`: defaults to `43200`
 - `PORT` or `LISTEN_ADDR`: defaults to `:8080`
+- `FFMPEG_PATH`: defaults to `ffmpeg`
+- `TRANSCODER_WORK_DIR`: defaults to `/work`
+- `TRANSCODER_POLL_SECONDS`: defaults to `5`
+
+## Transcoder Worker
+
+The container image includes two entrypoints:
+
+- `/usr/local/bin/b2-share-broker`: browser app and API
+- `/usr/local/bin/b2-share-transcoder`: internal queue worker
+
+The worker polls Postgres for queued jobs, runs one job at a time, downloads the
+source B2 object, executes:
+
+```bash
+ffmpeg -hide_banner -y -i input.mp4 -map 0 -c copy -movflags +faststart output.mp4
+```
+
+Then it hashes the output, uploads it as `s/<sha256>.mp4` if not already known,
+records the derivative, and repoints the existing alias. Original uploaded B2
+objects are retained.
 
 ## Keycloak Setup
 
@@ -189,6 +243,7 @@ least-privilege B2 application key for the selected public bucket, set
 ```bash
 go test ./...
 go build ./cmd/b2-share-broker
+go build ./cmd/b2-share-transcoder
 ```
 
 ## Follow-up

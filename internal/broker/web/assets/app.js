@@ -3,8 +3,8 @@ const DB_VERSION = 1;
 const STORE_NAME = "pending";
 const PENDING_KEY = "current";
 const MEDIA_ANALYSIS_BYTES = 2 * 1024 * 1024;
-const DEFERRED_VIDEO_ACTIONS = Object.freeze([
-  { kind: "remux", status: "deferred", requires: "media-worker" },
+const VIDEO_ACTIONS = Object.freeze([
+  { kind: "remux", status: "available", profile: "mp4-faststart-remux" },
   { kind: "transcode", status: "deferred", requires: "gpu-capacity" }
 ]);
 
@@ -12,6 +12,8 @@ const state = {
   session: { authenticated: false },
   file: null,
   mediaPlan: null,
+  processingJob: null,
+  processingPoll: 0,
   publicUrl: "",
   shares: []
 };
@@ -164,8 +166,10 @@ async function loadPendingShare() {
 }
 
 function setFile(file) {
+  clearProcessingPoll();
   state.file = file;
   state.mediaPlan = null;
+  state.processingJob = null;
   state.publicUrl = "";
   render();
   if (!file) {
@@ -196,9 +200,7 @@ function render() {
   els.resultPanel.classList.toggle("hidden", !state.publicUrl);
   els.historyPanel.classList.toggle("hidden", !state.session.authenticated || state.shares.length === 0);
   els.resultUrl.textContent = state.publicUrl;
-  const warning = state.mediaPlan && state.mediaPlan.warning ? state.mediaPlan.warning : "";
-  els.mediaWarning.textContent = warning;
-  els.mediaWarning.classList.toggle("hidden", !warning);
+  renderMediaWarning();
   if (state.file) {
     els.fileTitle.textContent = state.file.name || "upload";
     els.fileMeta.textContent = `${formatBytes(state.file.size)} - ${state.file.type || "application/octet-stream"}`;
@@ -212,6 +214,34 @@ function render() {
 function setStatus(message, isError = false) {
   els.statusText.textContent = message;
   els.statusText.classList.toggle("error", isError);
+}
+
+function renderMediaWarning() {
+  els.mediaWarning.textContent = "";
+  const warning = state.mediaPlan && state.mediaPlan.warning ? state.mediaPlan.warning : "";
+  els.mediaWarning.classList.toggle("hidden", !warning);
+  if (!warning) {
+    return;
+  }
+
+  const text = document.createElement("span");
+  text.textContent = warning;
+  els.mediaWarning.append(text);
+
+  const remuxAction = (state.mediaPlan.actions || []).find((action) => action.kind === "remux" && action.status === "available");
+  if (!remuxAction || !state.publicUrl) {
+    return;
+  }
+
+  const job = state.processingJob;
+  const isBusy = job && (job.status === "queued" || job.status === "running");
+  const button = document.createElement("button");
+  button.className = "button secondary compact";
+  button.type = "button";
+  button.textContent = isBusy ? formatProcessingStatus(job.status) : "Remux";
+  button.disabled = isBusy;
+  button.addEventListener("click", () => startProcessingJob(remuxAction.profile));
+  els.mediaWarning.append(button);
 }
 
 async function uploadSelectedFile() {
@@ -422,10 +452,98 @@ async function inspectMediaPlan(file) {
       status: "warning",
       code: "mp4_moov_after_mdat",
       warning: "MP4 metadata is at the end; inline players may stall until it is remuxed.",
-      actions: DEFERRED_VIDEO_ACTIONS
+      actions: VIDEO_ACTIONS
     };
   }
   return null;
+}
+
+async function startProcessingJob(profile) {
+  const slug = slugFromShareURL(state.publicUrl);
+  if (!slug) {
+    setStatus("Share URL is missing.", true);
+    return;
+  }
+  try {
+    setStatus("Queueing remux");
+    const job = await apiFetch(`/api/shares/${encodeURIComponent(slug)}/processing-jobs`, {
+      method: "POST",
+      body: JSON.stringify({ profile })
+    });
+    state.processingJob = job;
+    render();
+    pollProcessingJob(job.jobId);
+  } catch (error) {
+    setStatus(error.message || "Remux failed to start.", true);
+  }
+}
+
+async function pollProcessingJob(jobId) {
+  clearProcessingPoll();
+  if (!jobId) {
+    return;
+  }
+  try {
+    const job = await apiFetch(`/api/processing-jobs/${encodeURIComponent(jobId)}`, { method: "GET" });
+    state.processingJob = job;
+    if (job.status === "completed") {
+      state.mediaPlan = null;
+      state.processingJob = null;
+      await loadShares();
+      setStatus("Remuxed");
+      render();
+      return;
+    }
+    if (job.status === "failed") {
+      setStatus(job.error || "Remux failed.", true);
+      render();
+      return;
+    }
+    setStatus(formatProcessingStatus(job.status));
+    render();
+    state.processingPoll = window.setTimeout(() => pollProcessingJob(jobId), 2500);
+  } catch (error) {
+    setStatus(error.message || "Remux status unavailable.", true);
+    render();
+  }
+}
+
+function clearProcessingPoll() {
+  if (state.processingPoll) {
+    window.clearTimeout(state.processingPoll);
+    state.processingPoll = 0;
+  }
+}
+
+function formatProcessingStatus(status) {
+  switch (status) {
+    case "queued":
+      return "Remux queued";
+    case "running":
+      return "Remuxing";
+    case "completed":
+      return "Remuxed";
+    case "failed":
+      return "Remux failed";
+    default:
+      return "Remux";
+  }
+}
+
+function slugFromShareURL(value) {
+  if (!value) {
+    return "";
+  }
+  try {
+    const parsed = new URL(value, location.origin);
+    if (parsed.origin !== location.origin || !parsed.pathname.startsWith("/s/")) {
+      return "";
+    }
+    const slug = decodeURIComponent(parsed.pathname.slice(3));
+    return slug && !slug.includes("/") ? slug : "";
+  } catch (error) {
+    return "";
+  }
 }
 
 function looksLikeMP4(file) {

@@ -19,6 +19,7 @@ const (
 	defaultPresignTTL      = 15 * time.Minute
 	defaultUploadTokenTTL  = time.Hour
 	defaultSessionTTL      = 12 * time.Hour
+	defaultTranscoderPoll  = 5 * time.Second
 	minUploadTokenKeyBytes = 32
 )
 
@@ -44,6 +45,9 @@ type Config struct {
 	AliasHMACKey      []byte
 	SessionTTL        time.Duration
 	SessionAuthKey    []byte
+	FFmpegPath        string
+	TranscoderWorkDir string
+	TranscoderPoll    time.Duration
 	Clock             func() time.Time
 }
 
@@ -93,6 +97,9 @@ func LoadConfigFromEnv() (Config, error) {
 		AliasHMACKey:      aliasHMACKey,
 		SessionTTL:        envDurationSeconds("SESSION_TTL_SECONDS", defaultSessionTTL),
 		SessionAuthKey:    sessionAuthKey,
+		FFmpegPath:        envString("FFMPEG_PATH", "ffmpeg"),
+		TranscoderWorkDir: envString("TRANSCODER_WORK_DIR", "/work"),
+		TranscoderPoll:    envDurationSeconds("TRANSCODER_POLL_SECONDS", defaultTranscoderPoll),
 		Clock:             time.Now,
 	}
 
@@ -162,6 +169,9 @@ func (c Config) Validate() error {
 	}
 	if c.SessionTTL <= 0 {
 		return errors.New("SESSION_TTL_SECONDS must be positive")
+	}
+	if c.TranscoderPoll <= 0 {
+		return errors.New("TRANSCODER_POLL_SECONDS must be positive")
 	}
 	if c.ObjectPrefix == "" {
 		return errors.New("OBJECT_PREFIX must not be empty")
