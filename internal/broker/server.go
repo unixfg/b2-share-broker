@@ -29,13 +29,16 @@ type createUploadRequest struct {
 }
 
 type createUploadResponse struct {
-	UploadURL       string            `json:"uploadUrl,omitempty"`
-	RequiredHeaders map[string]string `json:"requiredHeaders,omitempty"`
-	ObjectKey       string            `json:"objectKey"`
-	UploadToken     string            `json:"uploadToken,omitempty"`
-	PublicURL       string            `json:"publicUrl"`
-	B2URL           string            `json:"b2Url"`
-	AlreadyUploaded bool              `json:"alreadyUploaded"`
+	UploadURL         string            `json:"uploadUrl,omitempty"`
+	RequiredHeaders   map[string]string `json:"requiredHeaders,omitempty"`
+	ObjectKey         string            `json:"objectKey"`
+	UploadToken       string            `json:"uploadToken,omitempty"`
+	PublicURL         string            `json:"publicUrl"`
+	B2URL             string            `json:"b2Url"`
+	AlreadyUploaded   bool              `json:"alreadyUploaded"`
+	SourceSHA256      string            `json:"sourceSha256,omitempty"`
+	ServedSHA256      string            `json:"servedSha256,omitempty"`
+	ProcessingProfile string            `json:"processingProfile,omitempty"`
 }
 
 type completeUploadRequest struct {
@@ -256,10 +259,20 @@ func (s *Server) handleCreateUpload(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "failed to look up object")
 		return
 	} else if found {
+		targetObject := object
+		processingProfile := ""
+		if derivative, derivativeFound, err := s.metadata.GetDerivedObject(r.Context(), object.SHA256, ProcessingProfileMP4FaststartRemux); err != nil {
+			s.logger.Error("failed to look up derived object metadata", "sha256", sha256Hex, "profile", ProcessingProfileMP4FaststartRemux, "error", err)
+			writeJSONError(w, http.StatusInternalServerError, "failed to look up object")
+			return
+		} else if derivativeFound {
+			targetObject = derivative
+			processingProfile = ProcessingProfileMP4FaststartRemux
+		}
 		if err := s.metadata.UpsertAlias(r.Context(), ShareAlias{
 			Slug:            aliasSlug,
-			ObjectSHA256:    object.SHA256,
-			ObjectKey:       object.ObjectKey,
+			ObjectSHA256:    targetObject.SHA256,
+			ObjectKey:       targetObject.ObjectKey,
 			Owner:           authenticated.Principal.Subject,
 			DisplayFilename: displayFilename,
 			Visibility:      "public",
@@ -269,10 +282,13 @@ func (s *Server) handleCreateUpload(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusOK, createUploadResponse{
-			ObjectKey:       object.ObjectKey,
-			PublicURL:       publicURL,
-			B2URL:           PublicURL(s.cfg.B2PublicBaseURL, object.ObjectKey),
-			AlreadyUploaded: true,
+			ObjectKey:         targetObject.ObjectKey,
+			PublicURL:         publicURL,
+			B2URL:             PublicURL(s.cfg.B2PublicBaseURL, targetObject.ObjectKey),
+			AlreadyUploaded:   true,
+			SourceSHA256:      object.SHA256,
+			ServedSHA256:      targetObject.SHA256,
+			ProcessingProfile: processingProfile,
 		})
 		return
 	}
@@ -307,6 +323,8 @@ func (s *Server) handleCreateUpload(w http.ResponseWriter, r *http.Request) {
 		UploadToken:     uploadToken,
 		PublicURL:       publicURL,
 		B2URL:           b2URL,
+		SourceSHA256:    sha256Hex,
+		ServedSHA256:    sha256Hex,
 	})
 }
 

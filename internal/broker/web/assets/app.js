@@ -279,6 +279,9 @@ async function uploadSelectedFile() {
     });
     if (createResponse.alreadyUploaded) {
       state.publicUrl = createResponse.publicUrl;
+      if (usesProcessedObject(createResponse, sha256)) {
+        state.mediaPlan = null;
+      }
       await clearPending();
       await loadShares();
       setStatus("Uploaded");
@@ -544,6 +547,12 @@ function slugFromShareURL(value) {
   } catch (error) {
     return "";
   }
+}
+
+function usesProcessedObject(response, sourceSHA256) {
+  const source = (response.sourceSha256 || sourceSHA256 || "").toLowerCase();
+  const served = (response.servedSha256 || "").toLowerCase();
+  return Boolean(response.processingProfile) || (source && served && source !== served);
 }
 
 function looksLikeMP4(file) {
