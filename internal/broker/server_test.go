@@ -471,6 +471,52 @@ func TestCreateUploadVideoQueuesMP4Normalization(t *testing.T) {
 	}
 }
 
+func TestCreateUploadRejectsNonMultipartBody(t *testing.T) {
+	cfg := testConfig(t)
+	metadata := newMemoryMetadata()
+	server := NewServer(cfg, authenticatedFakeAuth("user-1"), &fakeStore{}, metadata, slog.Default())
+	request := httptest.NewRequest(http.MethodPost, "/api/uploads", strings.NewReader(`{"file":"nope"}`))
+	request.Header.Set("Content-Type", "application/json")
+	setCSRF(request)
+	recorder := httptest.NewRecorder()
+
+	server.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "multipart/form-data file upload is required") {
+		t.Fatalf("body = %s", recorder.Body.String())
+	}
+	if len(metadata.jobs) != 0 {
+		t.Fatalf("jobs = %#v", metadata.jobs)
+	}
+}
+
+func TestCreateUploadReportsMultipartBodyTooLarge(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.MaxUploadBytes = 1
+	metadata := newMemoryMetadata()
+	server := NewServer(cfg, authenticatedFakeAuth("user-1"), &fakeStore{}, metadata, slog.Default())
+	body, contentType := multipartUpload(t, "file", "large.bin", "application/octet-stream", bytes.Repeat([]byte("x"), 17<<20), "")
+	request := httptest.NewRequest(http.MethodPost, "/api/uploads", body)
+	request.Header.Set("Content-Type", contentType)
+	setCSRF(request)
+	recorder := httptest.NewRecorder()
+
+	server.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "file is larger than the configured maximum") {
+		t.Fatalf("body = %s", recorder.Body.String())
+	}
+	if len(metadata.jobs) != 0 {
+		t.Fatalf("jobs = %#v", metadata.jobs)
+	}
+}
+
 func TestCreateUploadRejectsCustomAliasField(t *testing.T) {
 	cfg := testConfig(t)
 	metadata := newMemoryMetadata()
