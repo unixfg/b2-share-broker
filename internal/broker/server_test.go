@@ -641,7 +641,7 @@ func TestPublicShareStatesAndRedirect(t *testing.T) {
 	metadata.objects[testSHA256] = StoredObject{SHA256: testSHA256, ObjectKey: key, Size: 12, ContentType: "text/plain", Status: "ready"}
 	metadata.aliases["pending.txt"] = ShareAlias{Slug: "pending.txt", Owner: "user-1", Visibility: "public", Status: AliasStatusPending}
 	metadata.aliases["failed.txt"] = ShareAlias{Slug: "failed.txt", Owner: "user-1", Visibility: "public", Status: AliasStatusFailed}
-	metadata.aliases["ready.txt"] = ShareAlias{Slug: "ready.txt", ObjectSHA256: testSHA256, ObjectKey: key, Owner: "user-1", Visibility: "public", Status: AliasStatusReady}
+	metadata.aliases["ready.txt"] = ShareAlias{Slug: "ready.txt", ObjectSHA256: testSHA256, ObjectKey: key, Owner: "user-1", Visibility: "public", Status: AliasStatusReady, ContentType: "text/plain"}
 	server := NewServer(cfg, fakeAuth{err: ErrUnauthorized}, &fakeStore{}, metadata, slog.Default())
 
 	for _, item := range []struct {
@@ -661,9 +661,79 @@ func TestPublicShareStatesAndRedirect(t *testing.T) {
 		if item.want == http.StatusFound && recorder.Header().Get("Location") != "https://bucket.s3.us-west-004.backblazeb2.com/"+key {
 			t.Fatalf("location = %q", recorder.Header().Get("Location"))
 		}
+		if item.want == http.StatusFound {
+			if recorder.Header().Get("Content-Type") != "text/plain" {
+				t.Fatalf("content-type = %q", recorder.Header().Get("Content-Type"))
+			}
+			if recorder.Body.Len() != 0 {
+				t.Fatalf("redirect body = %q", recorder.Body.String())
+			}
+		}
 	}
 	if metadata.aliases["ready.txt"].RedirectCount != 1 {
 		t.Fatalf("redirect count = %d", metadata.aliases["ready.txt"].RedirectCount)
+	}
+}
+
+func TestPublicShareCORSAllowsConfiguredOrigin(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.PublicShareCORSAllowedOrigins = []string{"https://discord.com"}
+	metadata := newMemoryMetadata()
+	key := "01/" + testSHA256 + ".mp4"
+	metadata.aliases["ready.mp4"] = ShareAlias{Slug: "ready.mp4", ObjectSHA256: testSHA256, ObjectKey: key, Owner: "user-1", Visibility: "public", Status: AliasStatusReady, ContentType: "video/mp4"}
+	server := NewServer(cfg, fakeAuth{err: ErrUnauthorized}, &fakeStore{}, metadata, slog.Default())
+	request := httptest.NewRequest(http.MethodGet, "/s/ready.mp4", nil)
+	request.Header.Set("Origin", "https://discord.com")
+	recorder := httptest.NewRecorder()
+
+	server.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusFound {
+		t.Fatalf("status = %d", recorder.Code)
+	}
+	if recorder.Header().Get("Access-Control-Allow-Origin") != "https://discord.com" {
+		t.Fatalf("allow origin = %q", recorder.Header().Get("Access-Control-Allow-Origin"))
+	}
+	if recorder.Header().Get("Access-Control-Expose-Headers") == "" {
+		t.Fatal("expected exposed headers")
+	}
+	if recorder.Header().Get("Content-Type") != "video/mp4" {
+		t.Fatalf("content-type = %q", recorder.Header().Get("Content-Type"))
+	}
+}
+
+func TestPublicShareCORSPreflightAndDisallowedOrigin(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.PublicShareCORSAllowedOrigins = []string{"https://discord.com"}
+	server := NewServer(cfg, fakeAuth{err: ErrUnauthorized}, &fakeStore{}, newMemoryMetadata(), slog.Default())
+	request := httptest.NewRequest(http.MethodOptions, "/s/ready.mp4", nil)
+	request.Header.Set("Origin", "https://discord.com")
+	request.Header.Set("Access-Control-Request-Method", "GET")
+	request.Header.Set("Access-Control-Request-Headers", "range")
+	recorder := httptest.NewRecorder()
+
+	server.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusNoContent {
+		t.Fatalf("status = %d", recorder.Code)
+	}
+	if recorder.Header().Get("Access-Control-Allow-Origin") != "https://discord.com" {
+		t.Fatalf("allow origin = %q", recorder.Header().Get("Access-Control-Allow-Origin"))
+	}
+	if recorder.Header().Get("Access-Control-Allow-Headers") != "Range" {
+		t.Fatalf("allow headers = %q", recorder.Header().Get("Access-Control-Allow-Headers"))
+	}
+
+	request = httptest.NewRequest(http.MethodOptions, "/s/ready.mp4", nil)
+	request.Header.Set("Origin", "https://example.com")
+	recorder = httptest.NewRecorder()
+	server.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusNoContent {
+		t.Fatalf("status = %d", recorder.Code)
+	}
+	if recorder.Header().Get("Access-Control-Allow-Origin") != "" {
+		t.Fatalf("disallowed origin was allowed: %q", recorder.Header().Get("Access-Control-Allow-Origin"))
 	}
 }
 

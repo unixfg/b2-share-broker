@@ -62,7 +62,7 @@ curl -sS -X POST "https://share.doesthings.online/api/uploads" \
             <li>The current upload limit is 2 GiB.</li>
             <li>Public share URLs under <code>/s/</code> are unlisted but readable by anyone with the URL.</li>
             <li>Ready shares return a 302 redirect to the native public B2 object URL.</li>
-            <li>B2 CORS is a manual read-only allowlist for public media consumers.</li>
+            <li>Public media CORS is a manual read-only allowlist on both the share redirect and B2 bucket.</li>
           </ul>
         </section>
       </main>
