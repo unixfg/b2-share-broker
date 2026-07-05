@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -308,7 +309,12 @@ func (s *Server) handleListShares(w http.ResponseWriter, r *http.Request) {
 		writeAuthError(w, err)
 		return
 	}
-	aliases, err := s.metadata.ListAliases(r.Context(), authenticated.Principal.Subject, 50)
+	aliases, err := s.metadata.ListAliases(
+		r.Context(),
+		authenticated.Principal.Subject,
+		r.URL.Query().Get("q"),
+		parseShareLimit(r.URL.Query().Get("limit")),
+	)
 	if err != nil {
 		s.logger.Error("failed to list shares", "error", err)
 		writeJSONError(w, http.StatusInternalServerError, "failed to list shares")
@@ -321,6 +327,21 @@ func (s *Server) handleListShares(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, listSharesResponse{Shares: aliases})
+}
+
+func parseShareLimit(value string) int {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 50
+	}
+	limit, err := strconv.Atoi(value)
+	if err != nil || limit <= 0 {
+		return 50
+	}
+	if limit > 100 {
+		return 100
+	}
+	return limit
 }
 
 func (s *Server) handleShare(w http.ResponseWriter, r *http.Request) {

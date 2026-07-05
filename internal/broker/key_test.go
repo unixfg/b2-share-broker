@@ -45,10 +45,21 @@ func TestGenerateRandomAliasSlugUsesFilenameAndFinalExtension(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasSuffix(slug, "-clip_mov.mp4") {
+	if !strings.HasPrefix(slug, "clip_mov-") || !strings.HasSuffix(slug, ".mp4") {
 		t.Fatalf("slug = %q", slug)
 	}
-	if len(strings.TrimSuffix(slug, "-clip_mov.mp4")) != 16 {
+	random := strings.TrimSuffix(strings.TrimPrefix(slug, "clip_mov-"), ".mp4")
+	if len(random) != 16 {
+		t.Fatalf("slug = %q", slug)
+	}
+}
+
+func TestGenerateRandomAliasSlugFallsBackToFilenameExtension(t *testing.T) {
+	slug, err := GenerateRandomAliasSlug("Screenshot 1.PNG", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(slug, "screenshot_1-") || !strings.HasSuffix(slug, ".png") {
 		t.Fatalf("slug = %q", slug)
 	}
 }

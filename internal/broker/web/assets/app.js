@@ -8,6 +8,8 @@ const state = {
   file: null,
   processingJob: null,
   processingPoll: 0,
+  historySearch: "",
+  historySearchPoll: 0,
   publicUrl: "",
   shares: []
 };
@@ -49,6 +51,7 @@ function bindElements() {
     "copyButton",
     "shareButton",
     "historyPanel",
+    "historySearch",
     "historyList"
   ]) {
     els[id] = document.getElementById(id);
@@ -79,6 +82,10 @@ function bindEvents() {
   });
   els.copyButton.addEventListener("click", copyResult);
   els.shareButton.addEventListener("click", shareResult);
+  els.historySearch.addEventListener("input", () => {
+    state.historySearch = els.historySearch.value;
+    scheduleHistorySearch();
+  });
   for (const eventName of ["dragenter", "dragover"]) {
     els.dropzone.addEventListener(eventName, (event) => {
       event.preventDefault();
@@ -134,7 +141,14 @@ async function loadShares() {
     return;
   }
   try {
-    const response = await apiFetch("/api/shares", { method: "GET" });
+    const params = new URLSearchParams();
+    const query = state.historySearch.trim();
+    if (query) {
+      params.set("q", query);
+    }
+    const queryString = params.toString();
+    const path = queryString ? `/api/shares?${queryString}` : "/api/shares";
+    const response = await apiFetch(path, { method: "GET" });
     state.shares = response.shares || [];
   } catch (error) {
     state.shares = [];
@@ -172,7 +186,7 @@ function render() {
   els.uploadButton.disabled = !state.file;
   els.clearButton.disabled = !state.file && !state.publicUrl;
   els.resultPanel.classList.toggle("hidden", !state.publicUrl);
-  els.historyPanel.classList.toggle("hidden", !state.session.authenticated || state.shares.length === 0);
+  els.historyPanel.classList.toggle("hidden", !state.session.authenticated);
   els.resultUrl.textContent = state.publicUrl;
   renderMediaWarning();
   if (state.file) {
@@ -262,6 +276,13 @@ function renderShares() {
     return;
   }
   els.historyList.textContent = "";
+  if (state.shares.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "history-empty";
+    empty.textContent = state.historySearch.trim() ? "No matching shares" : "No shares yet";
+    els.historyList.append(empty);
+    return;
+  }
   for (const share of state.shares) {
     const item = document.createElement("article");
     item.className = "history-item";
@@ -304,6 +325,17 @@ function renderShares() {
     item.append(actions);
     els.historyList.append(item);
   }
+}
+
+function scheduleHistorySearch() {
+  if (state.historySearchPoll) {
+    window.clearTimeout(state.historySearchPoll);
+  }
+  state.historySearchPoll = window.setTimeout(async () => {
+    state.historySearchPoll = 0;
+    await loadShares();
+    render();
+  }, 250);
 }
 
 function historySpan(value) {
