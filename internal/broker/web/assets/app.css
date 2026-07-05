@@ -1,18 +1,40 @@
 :root {
-  color-scheme: light;
-  --paper: #f7f4ee;
-  --surface: #ffffff;
-  --ink: #222426;
-  --muted: #666b70;
-  --line: #d9d4cb;
+  color-scheme: light dark;
+  --paper: #e7ecef;
+  --surface: #f2f5f7;
+  --field: #e9eef2;
+  --ink: #17202a;
+  --muted: #53606c;
+  --line: #c4ccd4;
   --accent: #216e4e;
-  --accent-ink: #ffffff;
+  --accent-ink: #f7fbf9;
   --danger: #8d2525;
-  --danger-ink: #ffffff;
+  --danger-ink: #fff7f7;
   --warn: #9b2f28;
-  --warn-bg: #fff2c2;
-  --warn-line: #dfb94d;
+  --warn-bg: #f1d27b;
+  --warn-line: #c89724;
+  --warn-ink: #4c3908;
   --focus: #7c5cff;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #101417;
+    --surface: #181d21;
+    --field: #20262b;
+    --ink: #eef2f5;
+    --muted: #a8b2bc;
+    --line: #343c43;
+    --accent: #4fb381;
+    --accent-ink: #07110c;
+    --danger: #d95f5f;
+    --danger-ink: #140606;
+    --warn: #f3ba5d;
+    --warn-bg: #312711;
+    --warn-line: #8b681c;
+    --warn-ink: #f8dc9a;
+    --focus: #a996ff;
+  }
 }
 
 * {
@@ -27,6 +49,7 @@ html {
 body {
   min-height: 100%;
   margin: 0;
+  background: var(--paper);
   color: var(--ink);
   font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   font-size: 16px;
@@ -85,7 +108,8 @@ pre {
   border: 1px solid var(--line);
   border-radius: 8px;
   overflow-x: auto;
-  background: #fbfaf7;
+  background: var(--field);
+  color: var(--ink);
   font-size: 0.9rem;
 }
 
@@ -157,9 +181,9 @@ pre {
   gap: 4px;
   min-height: 170px;
   padding: 22px;
-  border: 1px dashed #9c9488;
+  border: 1px dashed color-mix(in srgb, var(--line) 70%, var(--ink));
   border-radius: 8px;
-  background: #fbfaf7;
+  background: var(--field);
   cursor: pointer;
 }
 
@@ -211,7 +235,7 @@ pre {
 
 .button.secondary {
   border-color: var(--line);
-  background: #ffffff;
+  background: var(--field);
   color: var(--ink);
 }
 
@@ -242,7 +266,7 @@ pre {
   border: 1px solid var(--line);
   border-radius: 8px;
   overflow-wrap: anywhere;
-  background: #fbfaf7;
+  background: var(--field);
 }
 
 .media-warning {
@@ -256,7 +280,7 @@ pre {
   border: 1px solid var(--warn-line);
   border-radius: 8px;
   background: var(--warn-bg);
-  color: #5f4200;
+  color: var(--warn-ink);
   font-size: 0.92rem;
 }
 
@@ -284,7 +308,7 @@ pre {
   padding: 0 12px;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: #fbfaf7;
+  background: var(--field);
   color: var(--ink);
 }
 
@@ -298,7 +322,7 @@ pre {
   padding: 12px;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: #fbfaf7;
+  background: var(--field);
 }
 
 .history-title {
