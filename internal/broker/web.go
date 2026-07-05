@@ -19,7 +19,11 @@ func (s *Server) registerWebRoutes() {
 	assetServer := http.FileServer(http.FS(serverFS))
 	s.mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/", "/share":
+		case "/":
+			s.serveWebFile(w, r, serverFS, "landing.html")
+		case "/docs", "/docs/":
+			s.serveWebFile(w, r, serverFS, "docs.html")
+		case "/share":
 			s.serveWebFile(w, r, serverFS, "index.html")
 		case "/manifest.webmanifest":
 			w.Header().Set("Content-Type", "application/manifest+json; charset=utf-8")

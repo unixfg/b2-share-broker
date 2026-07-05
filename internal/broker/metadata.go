@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -84,7 +85,7 @@ type MetadataStore interface {
 	UpsertAlias(ctx context.Context, alias ShareAlias) error
 	GetAlias(ctx context.Context, slug string) (ShareAlias, bool, error)
 	RecordAliasRedirect(ctx context.Context, slug string) error
-	ListAliases(ctx context.Context, owner string, limit int) ([]ShareAlias, error)
+	ListAliases(ctx context.Context, owner, query string, limit int) ([]ShareAlias, error)
 	DeleteAlias(ctx context.Context, slug, owner string) (DeletedShare, bool, error)
 	CreateIngestJob(ctx context.Context, job ProcessingJob, alias ShareAlias) (ProcessingJob, error)
 	GetProcessingJob(ctx context.Context, id, owner string) (ProcessingJob, bool, error)
@@ -323,15 +324,24 @@ func (s *PostgresMetadataStore) RecordAliasRedirect(ctx context.Context, slug st
 	return nil
 }
 
-func (s *PostgresMetadataStore) ListAliases(ctx context.Context, owner string, limit int) ([]ShareAlias, error) {
+func (s *PostgresMetadataStore) ListAliases(ctx context.Context, owner, query string, limit int) ([]ShareAlias, error) {
 	if limit <= 0 || limit > 100 {
 		limit = 50
 	}
+	query = strings.ToLower(strings.TrimSpace(query))
+	pattern := "%" + query + "%"
 	rows, err := s.db.QueryContext(ctx, aliasSelect()+`
 		WHERE a.owner_subject = $1
 			AND a.visibility <> 'deleted'
+			AND (
+				$2 = ''
+				OR lower(a.slug) LIKE $3
+				OR lower(a.display_filename) LIKE $3
+				OR lower(a.status) LIKE $3
+				OR lower(COALESCE(o.content_type, '')) LIKE $3
+			)
 		ORDER BY a.updated_at DESC
-		LIMIT $2`, owner, limit)
+		LIMIT $4`, owner, query, pattern, limit)
 	if err != nil {
 		return nil, err
 	}

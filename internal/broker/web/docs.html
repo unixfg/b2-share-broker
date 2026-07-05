@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#f7f4ee">
+    <title>B2 Share Docs</title>
+    <link rel="icon" href="/assets/icon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="/assets/app.css">
+  </head>
+  <body>
+    <div class="shell docs-shell">
+      <header class="topbar">
+        <div>
+          <h1>Docs</h1>
+          <p class="muted">API notes and examples for B2 Share.</p>
+        </div>
+        <nav class="auth-actions" aria-label="Navigation">
+          <a class="button secondary" href="/">Home</a>
+          <a class="button primary" href="/share">Upload</a>
+        </nav>
+      </header>
+
+      <main class="docs-content">
+        <section class="doc-section">
+          <h2>Upload</h2>
+          <p class="doc-copy">Uploads accept one multipart file and return a queued processing job plus the future share URL.</p>
+          <pre><code>export TOKEN="eyJ..."
+export FILE="./clip.mp4"
+
+curl -sS -X POST "https://share.doesthings.online/api/uploads" \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -F "file=@${FILE}"</code></pre>
+        </section>
+
+        <section class="doc-section">
+          <h2>Status</h2>
+          <p class="doc-copy">Poll the job until it is completed, failed, or canceled.</p>
+          <pre><code>curl -sS "https://share.doesthings.online/api/uploads/${JOB_ID}" \
+  -H "Authorization: Bearer ${TOKEN}"</code></pre>
+        </section>
+
+        <section class="doc-section">
+          <h2>History</h2>
+          <p class="doc-copy">History is owner-only. Search matches filename, slug, content type, and status.</p>
+          <pre><code>curl -sS "https://share.doesthings.online/api/shares?q=mp4" \
+  -H "Authorization: Bearer ${TOKEN}"</code></pre>
+        </section>
+
+        <section class="doc-section">
+          <h2>Delete</h2>
+          <p class="doc-copy">Deleting a share removes the public alias and deletes the B2 object only when no visible aliases still reference it.</p>
+          <pre><code>curl -sS -X DELETE "https://share.doesthings.online/api/shares/${SLUG}" \
+  -H "Authorization: Bearer ${TOKEN}"</code></pre>
+        </section>
+
+        <section class="doc-section">
+          <h2>Notes</h2>
+          <ul class="doc-list">
+            <li>Uploads are limited to one file at a time.</li>
+            <li>The current upload limit is 2 GiB.</li>
+            <li>Public share URLs under <code>/s/</code> are unlisted but readable by anyone with the URL.</li>
+            <li>Ready shares return a 302 redirect to the native public B2 object URL.</li>
+            <li>B2 CORS is a manual read-only allowlist for public media consumers.</li>
+          </ul>
+        </section>
+      </main>
+    </div>
+  </body>
+</html>

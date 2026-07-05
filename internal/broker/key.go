@@ -40,7 +40,7 @@ func GenerateRandomAliasSlug(filename, extension string) (string, error) {
 	if _, err := rand.Read(data[:]); err != nil {
 		return "", err
 	}
-	prefix := hex.EncodeToString(data[:])
+	suffix := hex.EncodeToString(data[:])
 	extension = normalizeExtension(extension)
 	name := strings.ToLower(SanitizeFilename(filename))
 	nameExt := path.Ext(name)
@@ -58,7 +58,7 @@ func GenerateRandomAliasSlug(filename, extension string) (string, error) {
 	if extension == "" {
 		extension = normalizeExtension(nameExt)
 	}
-	return prefix + "-" + base + extension, nil
+	return base + "-" + suffix + extension, nil
 }
 
 func ExtensionFor(filename, contentType string) string {

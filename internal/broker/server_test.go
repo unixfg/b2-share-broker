@@ -155,14 +155,32 @@ func (m *memoryMetadata) RecordAliasRedirect(_ context.Context, slug string) err
 	return nil
 }
 
-func (m *memoryMetadata) ListAliases(_ context.Context, owner string, _ int) ([]ShareAlias, error) {
+func (m *memoryMetadata) ListAliases(_ context.Context, owner, query string, limit int) ([]ShareAlias, error) {
+	query = strings.ToLower(strings.TrimSpace(query))
+	if limit <= 0 || limit > 100 {
+		limit = 50
+	}
 	var aliases []ShareAlias
 	for _, alias := range m.aliases {
-		if alias.Owner == owner && alias.Visibility != "deleted" {
-			aliases = append(aliases, alias)
+		if alias.Owner != owner || alias.Visibility == "deleted" {
+			continue
+		}
+		if query != "" && !aliasMatchesQuery(alias, query) {
+			continue
+		}
+		aliases = append(aliases, alias)
+		if len(aliases) >= limit {
+			break
 		}
 	}
 	return aliases, nil
+}
+
+func aliasMatchesQuery(alias ShareAlias, query string) bool {
+	return strings.Contains(strings.ToLower(alias.Slug), query) ||
+		strings.Contains(strings.ToLower(alias.DisplayFilename), query) ||
+		strings.Contains(strings.ToLower(alias.Status), query) ||
+		strings.Contains(strings.ToLower(alias.ContentType), query)
 }
 
 func (m *memoryMetadata) DeleteAlias(_ context.Context, slug, owner string) (DeletedShare, bool, error) {
@@ -423,7 +441,9 @@ func TestCreateUploadStagesMultipartAndQueuesShare(t *testing.T) {
 	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
 		t.Fatal(err)
 	}
-	if response.ShareURL != "https://share.doesthings.online/s/"+response.Slug || !strings.HasSuffix(response.Slug, "-screenshot_1.png") {
+	if response.ShareURL != "https://share.doesthings.online/s/"+response.Slug ||
+		!strings.HasPrefix(response.Slug, "screenshot_1-") ||
+		!strings.HasSuffix(response.Slug, ".png") {
 		t.Fatalf("response = %#v", response)
 	}
 	job := metadata.jobs[response.JobID]
@@ -462,7 +482,7 @@ func TestCreateUploadVideoQueuesMP4Normalization(t *testing.T) {
 	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasSuffix(response.Slug, "-clip.mp4") {
+	if !strings.HasPrefix(response.Slug, "clip-") || !strings.HasSuffix(response.Slug, ".mp4") {
 		t.Fatalf("slug = %q", response.Slug)
 	}
 	job := metadata.jobs[response.JobID]
@@ -676,6 +696,93 @@ func TestListSharesReturnsPendingAndReadyHistory(t *testing.T) {
 		}
 		if share.Slug == "ready.txt" && share.B2URL != "https://bucket.s3.us-west-004.backblazeb2.com/"+key {
 			t.Fatalf("share = %#v", share)
+		}
+	}
+}
+
+func TestListSharesSearchesOwnedVisibleHistory(t *testing.T) {
+	metadata := newMemoryMetadata()
+	metadata.aliases["video-1234.mp4"] = ShareAlias{Slug: "video-1234.mp4", Owner: "user-1", DisplayFilename: "Launch Clip.mp4", Visibility: "public", Status: AliasStatusReady, ContentType: "video/mp4"}
+	metadata.aliases["notes-1234.txt"] = ShareAlias{Slug: "notes-1234.txt", Owner: "user-1", DisplayFilename: "notes.txt", Visibility: "public", Status: AliasStatusReady, ContentType: "text/plain"}
+	metadata.aliases["deleted-video.mp4"] = ShareAlias{Slug: "deleted-video.mp4", Owner: "user-1", DisplayFilename: "Launch Clip.mp4", Visibility: "deleted", Status: AliasStatusReady, ContentType: "video/mp4"}
+	metadata.aliases["other-video.mp4"] = ShareAlias{Slug: "other-video.mp4", Owner: "user-2", DisplayFilename: "Launch Clip.mp4", Visibility: "public", Status: AliasStatusReady, ContentType: "video/mp4"}
+	server := NewServer(testConfig(t), authenticatedFakeAuth("user-1"), &fakeStore{}, metadata, slog.Default())
+	request := httptest.NewRequest(http.MethodGet, "/api/shares?q=video&limit=100", nil)
+	recorder := httptest.NewRecorder()
+
+	server.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	var response listSharesResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Shares) != 1 || response.Shares[0].Slug != "video-1234.mp4" {
+		t.Fatalf("response = %#v", response)
+	}
+}
+
+func TestListSharesSearchMatchesStatusAndHonorsLimit(t *testing.T) {
+	metadata := newMemoryMetadata()
+	metadata.aliases["failed.txt"] = ShareAlias{Slug: "failed.txt", Owner: "user-1", DisplayFilename: "failed.txt", Visibility: "public", Status: AliasStatusFailed}
+	metadata.aliases["failed-again.txt"] = ShareAlias{Slug: "failed-again.txt", Owner: "user-1", DisplayFilename: "failed-again.txt", Visibility: "public", Status: AliasStatusFailed}
+	server := NewServer(testConfig(t), authenticatedFakeAuth("user-1"), &fakeStore{}, metadata, slog.Default())
+	request := httptest.NewRequest(http.MethodGet, "/api/shares?q=failed&limit=1", nil)
+	recorder := httptest.NewRecorder()
+
+	server.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	var response listSharesResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Shares) != 1 {
+		t.Fatalf("response = %#v", response)
+	}
+}
+
+func TestParseShareLimitDefaultsAndCaps(t *testing.T) {
+	tests := map[string]int{
+		"":     50,
+		"nope": 50,
+		"0":    50,
+		"-1":   50,
+		"25":   25,
+		"101":  100,
+	}
+	for value, want := range tests {
+		if got := parseShareLimit(value); got != want {
+			t.Fatalf("parseShareLimit(%q) = %d, want %d", value, got, want)
+		}
+	}
+}
+
+func TestWebRoutesServeLandingDocsAndShareApp(t *testing.T) {
+	server := NewServer(testConfig(t), fakeAuth{err: ErrUnauthorized}, &fakeStore{}, newMemoryMetadata(), slog.Default())
+	tests := []struct {
+		path string
+		want string
+	}{
+		{"/", "B2 Share"},
+		{"/docs", "POST"},
+		{"/docs/", "DELETE"},
+		{"/share", "fileInput"},
+		{"/manifest.webmanifest", "share_target"},
+	}
+	for _, test := range tests {
+		request := httptest.NewRequest(http.MethodGet, test.path, nil)
+		recorder := httptest.NewRecorder()
+		server.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("%s status = %d, body = %s", test.path, recorder.Code, recorder.Body.String())
+		}
+		if !strings.Contains(recorder.Body.String(), test.want) {
+			t.Fatalf("%s body did not contain %q", test.path, test.want)
 		}
 	}
 }
