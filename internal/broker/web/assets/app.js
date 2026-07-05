@@ -49,7 +49,6 @@ function bindElements() {
     "resultPanel",
     "resultUrl",
     "copyButton",
-    "shareButton",
     "historyPanel",
     "historySearch",
     "historyList"
@@ -81,7 +80,6 @@ function bindEvents() {
     render();
   });
   els.copyButton.addEventListener("click", copyResult);
-  els.shareButton.addEventListener("click", shareResult);
   els.historySearch.addEventListener("input", () => {
     state.historySearch = els.historySearch.value;
     scheduleHistorySearch();
@@ -363,14 +361,6 @@ async function copyResult() {
   }
   await navigator.clipboard.writeText(state.publicUrl);
   setStatus("Copied");
-}
-
-async function shareResult() {
-  if (!state.publicUrl || !navigator.share) {
-    await copyResult();
-    return;
-  }
-  await navigator.share({ url: state.publicUrl });
 }
 
 async function deleteShare(share) {

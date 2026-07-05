@@ -22,28 +22,29 @@ const (
 )
 
 type Config struct {
-	ListenAddr        string
-	IssuerURL         string
-	OIDCClientID      string
-	OIDCClientSecret  string
-	OIDCAudience      string
-	RequiredRoles     []string
-	B2Endpoint        string
-	B2Region          string
-	B2Bucket          string
-	B2PublicBaseURL   string
-	PublicBaseURL     string
-	B2AccessKeyID     string
-	B2SecretAccessKey string
-	DatabaseURL       string
-	MaxUploadBytes    int64
-	SessionTTL        time.Duration
-	SessionAuthKey    []byte
-	FFmpegPath        string
-	TranscoderWorkDir string
-	TranscoderPoll    time.Duration
-	StagingDir        string
-	Clock             func() time.Time
+	ListenAddr                    string
+	IssuerURL                     string
+	OIDCClientID                  string
+	OIDCClientSecret              string
+	OIDCAudience                  string
+	RequiredRoles                 []string
+	B2Endpoint                    string
+	B2Region                      string
+	B2Bucket                      string
+	B2PublicBaseURL               string
+	PublicBaseURL                 string
+	B2AccessKeyID                 string
+	B2SecretAccessKey             string
+	DatabaseURL                   string
+	MaxUploadBytes                int64
+	SessionTTL                    time.Duration
+	SessionAuthKey                []byte
+	PublicShareCORSAllowedOrigins []string
+	FFmpegPath                    string
+	TranscoderWorkDir             string
+	TranscoderPoll                time.Duration
+	StagingDir                    string
+	Clock                         func() time.Time
 }
 
 func LoadConfigFromEnv() (Config, error) {
@@ -63,28 +64,29 @@ func LoadConfigFromEnv() (Config, error) {
 
 	b2PublicBaseURL := strings.TrimRight(envString("B2_PUBLIC_BASE_URL", ""), "/")
 	cfg := Config{
-		ListenAddr:        listenAddr,
-		IssuerURL:         envString("OIDC_ISSUER_URL", ""),
-		OIDCClientID:      envString("OIDC_CLIENT_ID", ""),
-		OIDCClientSecret:  envString("OIDC_CLIENT_SECRET", ""),
-		OIDCAudience:      firstEnv("OIDC_AUDIENCE", "OIDC_CLIENT_ID"),
-		RequiredRoles:     envListWithDefault("OIDC_REQUIRED_ROLES", defaultRequiredRoles),
-		B2Endpoint:        strings.TrimRight(envString("B2_ENDPOINT", ""), "/"),
-		B2Region:          envString("B2_REGION", defaultRegion),
-		B2Bucket:          envString("B2_BUCKET", ""),
-		B2PublicBaseURL:   b2PublicBaseURL,
-		PublicBaseURL:     strings.TrimRight(envString("PUBLIC_BASE_URL", b2PublicBaseURL), "/"),
-		B2AccessKeyID:     firstEnv("AWS_ACCESS_KEY_ID", "ACCESS_KEY_ID"),
-		B2SecretAccessKey: firstEnv("AWS_SECRET_ACCESS_KEY", "ACCESS_SECRET_KEY"),
-		DatabaseURL:       envString("DATABASE_URL", ""),
-		MaxUploadBytes:    envInt64("MAX_UPLOAD_BYTES", defaultMaxUploadBytes),
-		SessionTTL:        envDurationSeconds("SESSION_TTL_SECONDS", defaultSessionTTL),
-		SessionAuthKey:    sessionAuthKey,
-		FFmpegPath:        envString("FFMPEG_PATH", "ffmpeg"),
-		TranscoderWorkDir: envString("TRANSCODER_WORK_DIR", "/work"),
-		TranscoderPoll:    envDurationSeconds("TRANSCODER_POLL_SECONDS", defaultTranscoderPoll),
-		StagingDir:        envString("STAGING_DIR", "/staging"),
-		Clock:             time.Now,
+		ListenAddr:                    listenAddr,
+		IssuerURL:                     envString("OIDC_ISSUER_URL", ""),
+		OIDCClientID:                  envString("OIDC_CLIENT_ID", ""),
+		OIDCClientSecret:              envString("OIDC_CLIENT_SECRET", ""),
+		OIDCAudience:                  firstEnv("OIDC_AUDIENCE", "OIDC_CLIENT_ID"),
+		RequiredRoles:                 envListWithDefault("OIDC_REQUIRED_ROLES", defaultRequiredRoles),
+		B2Endpoint:                    strings.TrimRight(envString("B2_ENDPOINT", ""), "/"),
+		B2Region:                      envString("B2_REGION", defaultRegion),
+		B2Bucket:                      envString("B2_BUCKET", ""),
+		B2PublicBaseURL:               b2PublicBaseURL,
+		PublicBaseURL:                 strings.TrimRight(envString("PUBLIC_BASE_URL", b2PublicBaseURL), "/"),
+		B2AccessKeyID:                 firstEnv("AWS_ACCESS_KEY_ID", "ACCESS_KEY_ID"),
+		B2SecretAccessKey:             firstEnv("AWS_SECRET_ACCESS_KEY", "ACCESS_SECRET_KEY"),
+		DatabaseURL:                   envString("DATABASE_URL", ""),
+		MaxUploadBytes:                envInt64("MAX_UPLOAD_BYTES", defaultMaxUploadBytes),
+		SessionTTL:                    envDurationSeconds("SESSION_TTL_SECONDS", defaultSessionTTL),
+		SessionAuthKey:                sessionAuthKey,
+		PublicShareCORSAllowedOrigins: envList("PUBLIC_SHARE_CORS_ALLOWED_ORIGINS"),
+		FFmpegPath:                    envString("FFMPEG_PATH", "ffmpeg"),
+		TranscoderWorkDir:             envString("TRANSCODER_WORK_DIR", "/work"),
+		TranscoderPoll:                envDurationSeconds("TRANSCODER_POLL_SECONDS", defaultTranscoderPoll),
+		StagingDir:                    envString("STAGING_DIR", "/staging"),
+		Clock:                         time.Now,
 	}
 
 	return cfg, cfg.Validate()
@@ -130,6 +132,18 @@ func (c Config) Validate() error {
 	}
 	if _, err := url.ParseRequestURI(c.PublicBaseURL); err != nil {
 		return fmt.Errorf("PUBLIC_BASE_URL is invalid: %w", err)
+	}
+	for _, origin := range c.PublicShareCORSAllowedOrigins {
+		parsed, err := url.Parse(origin)
+		if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
+			if err != nil {
+				return fmt.Errorf("PUBLIC_SHARE_CORS_ALLOWED_ORIGINS contains invalid origin %q: %w", origin, err)
+			}
+			return fmt.Errorf("PUBLIC_SHARE_CORS_ALLOWED_ORIGINS contains invalid origin %q", origin)
+		}
+		if parsed.Scheme != "https" && parsed.Scheme != "http" {
+			return fmt.Errorf("PUBLIC_SHARE_CORS_ALLOWED_ORIGINS contains invalid origin %q", origin)
+		}
 	}
 	if parsed, err := url.Parse(c.DatabaseURL); err != nil || parsed.Scheme == "" || parsed.Host == "" {
 		if err != nil {

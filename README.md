@@ -148,6 +148,9 @@ Optional environment variables:
 
 - `MAX_UPLOAD_BYTES`: defaults to `536870912`
 - `SESSION_TTL_SECONDS`: defaults to `43200`
+- `PUBLIC_SHARE_CORS_ALLOWED_ORIGINS`: comma-separated exact origins allowed
+  to read public `/s/*` redirect responses with CORS, for example
+  `https://discord.com`
 - `PORT` or `LISTEN_ADDR`: defaults to `:8080`
 - `FFMPEG_PATH`: defaults to `ffmpeg`
 - `TRANSCODER_WORK_DIR`: defaults to `/work`

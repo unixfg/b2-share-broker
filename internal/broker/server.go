@@ -98,8 +98,13 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePublicShare(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodOptions {
+		s.handlePublicSharePreflight(w, r)
+		return
+	}
+	s.applyPublicShareCORS(w, r)
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		w.Header().Set("Allow", "GET, HEAD")
+		w.Header().Set("Allow", "GET, HEAD, OPTIONS")
 		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
@@ -131,10 +136,39 @@ func (s *Server) handlePublicShare(w http.ResponseWriter, r *http.Request) {
 		if err := s.metadata.RecordAliasRedirect(r.Context(), slug); err != nil {
 			s.logger.Warn("failed to record share redirect", "slug", slug, "error", err)
 		}
-		http.Redirect(w, r, PublicURL(s.cfg.B2PublicBaseURL, alias.ObjectKey), http.StatusFound)
+		writeShareRedirect(w, PublicURL(s.cfg.B2PublicBaseURL, alias.ObjectKey), alias.ContentType)
 	default:
 		writeShareStatusPage(w, r, http.StatusAccepted, "Processing", "This share is still being prepared.")
 	}
+}
+
+func (s *Server) handlePublicSharePreflight(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Allow", "GET, HEAD, OPTIONS")
+	if s.applyPublicShareCORS(w, r) {
+		w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Range")
+		w.Header().Set("Access-Control-Max-Age", "3600")
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) applyPublicShareCORS(w http.ResponseWriter, r *http.Request) bool {
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	if origin == "" {
+		return false
+	}
+	w.Header().Add("Vary", "Origin")
+	w.Header().Add("Vary", "Access-Control-Request-Method")
+	w.Header().Add("Vary", "Access-Control-Request-Headers")
+	for _, allowed := range s.cfg.PublicShareCORSAllowedOrigins {
+		if origin != allowed {
+			continue
+		}
+		w.Header().Set("Access-Control-Allow-Origin", origin)
+		w.Header().Set("Access-Control-Expose-Headers", "Accept-Ranges, Content-Length, Content-Range, Content-Type, ETag, Last-Modified, Location")
+		return true
+	}
+	return false
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
@@ -636,6 +670,16 @@ func writeShareStatusPage(w http.ResponseWriter, r *http.Request, statusCode int
 		return
 	}
 	_, _ = fmt.Fprintf(w, "<!doctype html><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>%s</title><body><main><h1>%s</h1><p>%s</p></main></body>", htmlEscape(title), htmlEscape(title), htmlEscape(message))
+}
+
+func writeShareRedirect(w http.ResponseWriter, location, contentType string) {
+	contentType = strings.TrimSpace(contentType)
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	w.Header().Set("Location", location)
+	w.Header().Set("Content-Type", contentType)
+	w.WriteHeader(http.StatusFound)
 }
 
 func htmlEscape(value string) string {
