@@ -39,7 +39,6 @@ type uploadStatusResponse struct {
 	Profile         string `json:"profile"`
 	Slug            string `json:"slug"`
 	ShareURL        string `json:"shareUrl"`
-	MediaURL        string `json:"mediaUrl,omitempty"`
 	TargetSHA256    string `json:"targetSha256,omitempty"`
 	TargetObjectKey string `json:"targetObjectKey,omitempty"`
 	Error           string `json:"error,omitempty"`
@@ -689,17 +688,12 @@ func htmlEscape(value string) string {
 }
 
 func uploadStatusResponseFromJob(cfg Config, job ProcessingJob) uploadStatusResponse {
-	mediaURL := ""
-	if job.TargetObjectKey != "" {
-		mediaURL = PublicURL(cfg.B2PublicBaseURL, job.TargetObjectKey)
-	}
 	return uploadStatusResponse{
 		JobID:           job.ID,
 		Status:          job.Status,
 		Profile:         job.Profile,
 		Slug:            job.AliasSlug,
 		ShareURL:        ShareURL(cfg.PublicBaseURL, job.AliasSlug),
-		MediaURL:        mediaURL,
 		TargetSHA256:    job.TargetSHA256,
 		TargetObjectKey: job.TargetObjectKey,
 		Error:           job.Error,
