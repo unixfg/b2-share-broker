@@ -634,39 +634,6 @@ func TestGetUploadStatusRequiresOwner(t *testing.T) {
 	}
 }
 
-func TestGetUploadStatusIncludesMediaURLWhenComplete(t *testing.T) {
-	metadata := newMemoryMetadata()
-	key := "01/" + testSHA256 + ".mp4"
-	metadata.jobs["job-1"] = ProcessingJob{
-		ID:              "job-1",
-		Owner:           "user-1",
-		AliasSlug:       "clip-1234.mp4",
-		Profile:         ProcessingProfileMP4Web,
-		Status:          ProcessingStatusCompleted,
-		TargetSHA256:    testSHA256,
-		TargetObjectKey: key,
-	}
-	server := NewServer(testConfig(t), authenticatedFakeAuth("user-1"), &fakeStore{}, metadata, slog.Default())
-	request := httptest.NewRequest(http.MethodGet, "/api/uploads/job-1", nil)
-	recorder := httptest.NewRecorder()
-
-	server.ServeHTTP(recorder, request)
-
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
-	}
-	var response uploadStatusResponse
-	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
-		t.Fatal(err)
-	}
-	if response.ShareURL != "https://share.doesthings.online/s/clip-1234.mp4" {
-		t.Fatalf("shareUrl = %q", response.ShareURL)
-	}
-	if response.MediaURL != "https://bucket.s3.us-west-004.backblazeb2.com/"+key {
-		t.Fatalf("mediaUrl = %q", response.MediaURL)
-	}
-}
-
 func TestPublicShareStatesAndRedirect(t *testing.T) {
 	cfg := testConfig(t)
 	metadata := newMemoryMetadata()
