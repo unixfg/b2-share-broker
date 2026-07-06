@@ -301,7 +301,7 @@ function renderShares() {
 
     const links = document.createElement("div");
     links.className = "history-links";
-    links.append(historyLink("Share", share.publicUrl), historyLink("B2", share.b2Url));
+    links.append(historyLink("Media", share.b2Url), historyLink("Alias", share.publicUrl));
 
     const deleteButton = document.createElement("button");
     deleteButton.className = "button danger compact";
@@ -391,7 +391,7 @@ async function pollUploadJob(jobId) {
   try {
     const job = await apiFetch(`/api/uploads/${encodeURIComponent(jobId)}`, { method: "GET" });
     state.processingJob = job;
-    state.publicUrl = job.shareUrl || state.publicUrl;
+    state.publicUrl = job.mediaUrl || job.shareUrl || state.publicUrl;
     if (job.status === "completed") {
       state.processingJob = null;
       await loadShares();

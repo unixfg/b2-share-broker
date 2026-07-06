@@ -36,7 +36,7 @@ curl -sS -X POST "https://share.doesthings.online/api/uploads" \
 
         <section class="doc-section">
           <h2>Status</h2>
-          <p class="doc-copy">Poll the job until it is completed, failed, or canceled.</p>
+          <p class="doc-copy">Poll the job until it is completed, failed, or canceled. Completed jobs include <code>mediaUrl</code>, the direct B2 URL to share with media players.</p>
           <pre><code>curl -sS "https://share.doesthings.online/api/uploads/${JOB_ID}" \
   -H "Authorization: Bearer ${TOKEN}"</code></pre>
         </section>
@@ -61,7 +61,8 @@ curl -sS -X POST "https://share.doesthings.online/api/uploads" \
             <li>Uploads are limited to one file at a time.</li>
             <li>The current upload limit is 2 GiB.</li>
             <li>Public share URLs under <code>/s/</code> are unlisted but readable by anyone with the URL.</li>
-            <li>Ready shares return a 302 redirect to the native public B2 object URL.</li>
+            <li>Use returned <code>mediaUrl</code> or history <code>b2Url</code> values for Discord and other inline media players.</li>
+            <li>Public <code>/s/</code> alias URLs remain canonical for share ownership, delete, and redirect stats, but ready aliases return a 302 redirect to B2.</li>
             <li>Public media CORS is a manual read-only allowlist on both the share redirect and B2 bucket.</li>
           </ul>
         </section>

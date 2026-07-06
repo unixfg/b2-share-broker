@@ -70,13 +70,14 @@ normalizes them before publication. Custom aliases are not supported.
 ### `GET /api/uploads/{jobId}`
 
 Returns owner-only upload processing status. Completed jobs include the target
-SHA-256 and B2 object key.
+SHA-256, B2 object key, and `mediaUrl`, which is the direct native B2 URL to
+share with inline media players such as Discord.
 
 ### `GET /api/shares`
 
 Returns recent aliases owned by the current subject with filenames, sizes,
-content types, status, redirect counts, share URLs, and native B2 URLs when the
-share is ready.
+content types, status, redirect counts, canonical `/s/` alias URLs, and direct
+native B2 URLs when the share is ready.
 
 ### `DELETE /api/shares/{slug}`
 
