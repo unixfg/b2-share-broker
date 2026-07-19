@@ -8,11 +8,25 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /out/b2-share-transcoder ./cmd/b2-share-transcoder
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /out/b2-share-processor ./cmd/b2-share-processor
 
-FROM alpine:3.22
+FROM debian:bookworm-slim
 
-RUN apk add --no-cache ca-certificates ffmpeg \
-	&& addgroup -S app \
-	&& adduser -S -G app -u 65532 app
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        gnupg \
+        curl \
+    && install -d /etc/apt/keyrings \
+    && curl -fsSL https://repo.jellyfin.org/jellyfin_team.gpg.key \
+        | gpg --dearmor -o /etc/apt/keyrings/jellyfin.gpg \
+    && echo "deb [signed-by=/etc/apt/keyrings/jellyfin.gpg] https://repo.jellyfin.org/debian bookworm main" \
+        > /etc/apt/sources.list.d/jellyfin.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends jellyfin-ffmpeg7 \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -sf /usr/lib/jellyfin-ffmpeg/ffmpeg /usr/bin/ffmpeg \
+    && ln -sf /usr/lib/jellyfin-ffmpeg/ffprobe /usr/bin/ffprobe \
+    && groupadd -r app -g 65532 \
+    && useradd -r -g app -u 65532 -s /usr/sbin/nologin app
 COPY --from=build /out/b2-share-broker /usr/local/bin/b2-share-broker
 COPY --from=build /out/b2-share-transcoder /usr/local/bin/b2-share-transcoder
 COPY --from=build /out/b2-share-processor /usr/local/bin/b2-share-processor
