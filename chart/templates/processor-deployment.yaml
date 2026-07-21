@@ -2,7 +2,7 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ .Chart.Name }}-processor
+  name: {{ include "b2-share-broker.shortName" . }}-processor
   namespace: {{ include "b2-share-broker.namespace" . }}
   labels:
     {{- include "b2-share-broker.labels" . | nindent 4 }}
@@ -140,7 +140,7 @@ spec:
       volumes:
         - name: staging
           persistentVolumeClaim:
-            claimName: {{ .Chart.Name }}-staging
+            claimName: {{ include "b2-share-broker.shortName" . }}-staging
         - name: work
           emptyDir:
             sizeLimit: 8Gi

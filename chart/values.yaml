@@ -1,6 +1,9 @@
 # Default values for b2-share-broker.
 # These defaults are placeholders. Override them for your cluster.
 
+# Common labels applied to all templated resources that use the labels helper.
+commonLabels: {}
+
 image:
   repository: ghcr.io/unixfg/b2-share-broker
   tag: main
@@ -10,6 +13,8 @@ image:
 
 namespace:
   create: true
+  # Additional labels on the Namespace resource (e.g. resilience policies).
+  labels: {}
 
 broker:
   replicas: 2

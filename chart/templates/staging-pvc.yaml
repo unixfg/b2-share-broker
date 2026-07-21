@@ -2,7 +2,7 @@
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: {{ .Chart.Name }}-staging
+  name: {{ include "b2-share-broker.shortName" . }}-staging
   namespace: {{ include "b2-share-broker.namespace" . }}
   labels:
     {{- include "b2-share-broker.labels" . | nindent 4 }}

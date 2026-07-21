@@ -6,6 +6,16 @@ Common name helpers.
 {{- end -}}
 
 {{/*
+Short app prefix for component resources (processor, staging).
+The chart is named b2-share-broker; component resources use b2-share-*
+to match the pre-Helm kustomize names.
+*/}}
+{{- define "b2-share-broker.shortName" -}}
+{{- $name := default .Chart.Name .Values.nameOverride -}}
+{{- if hasSuffix "-broker" $name -}}{{- trimSuffix "-broker" $name -}}{{- else -}}{{- $name -}}{{- end -}}
+{{- end -}}
+
+{{/*
 Fully qualified app name.
 */}}
 {{- define "b2-share-broker.fullname" -}}
