@@ -489,6 +489,9 @@ func TestCreateUploadVideoQueuesMP4Normalization(t *testing.T) {
 	if job.Profile != ProcessingProfileMP4Web || job.SourceType != "video/quicktime" {
 		t.Fatalf("job = %#v", job)
 	}
+	if job.SourceSHA256 != sha256Hex([]byte("mov data")) {
+		t.Fatalf("job source sha256 = %q, want %q", job.SourceSHA256, sha256Hex([]byte("mov data")))
+	}
 }
 
 func TestCreateUploadStreamsLargeFileWithoutMultipartTemp(t *testing.T) {

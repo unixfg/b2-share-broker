@@ -194,6 +194,16 @@ func (t *Transcoder) processJob(ctx context.Context, job ProcessingJob) error {
 	}
 	defer removeIfExists(job.StagingPath)
 
+	if strings.TrimSpace(job.SourceSHA256) != "" {
+		reused, err := t.reuseDerivative(ctx, job)
+		if err != nil {
+			return err
+		}
+		if reused {
+			return nil
+		}
+	}
+
 	final := processedFile{
 		Path:        job.StagingPath,
 		ContentType: strings.TrimSpace(job.SourceType),
@@ -332,6 +342,54 @@ func (t *Transcoder) normalizeVideo(ctx context.Context, job ProcessingJob) (pro
 		return processedFile{}, err
 	}
 	return processedFile{Path: finalPath, ContentType: "video/mp4", Extension: ".mp4", WorkDir: workDir}, nil
+}
+
+func (t *Transcoder) reuseDerivative(ctx context.Context, job ProcessingJob) (bool, error) {
+	derived, found, err := t.metadata.GetDerivedObject(ctx, job.SourceSHA256, job.Profile)
+	if err != nil {
+		return false, err
+	}
+	if !found {
+		return false, nil
+	}
+	object, ready, err := t.readyObject(ctx, derived.SHA256)
+	if err != nil {
+		return false, err
+	}
+	if !ready {
+		return false, nil
+	}
+
+	current, found, err := t.metadata.GetProcessingJob(ctx, job.ID, "")
+	if err != nil {
+		return false, err
+	}
+	if !found || current.Status == ProcessingStatusCanceled {
+		return true, nil
+	}
+	if current.Status != ProcessingStatusRunning {
+		return false, fmt.Errorf("processing job %q is %q, not running", job.ID, current.Status)
+	}
+
+	t.logger.Info("reusing existing derivative for duplicate source",
+		"jobID", job.ID,
+		"profile", job.Profile,
+		"sourceSHA256", job.SourceSHA256,
+		"objectSHA256", object.SHA256,
+	)
+	err = t.metadata.CompleteProcessingJob(ctx, job.ID, object, ShareAlias{
+		Slug:            job.AliasSlug,
+		ObjectSHA256:    object.SHA256,
+		ObjectKey:       object.ObjectKey,
+		Owner:           job.Owner,
+		DisplayFilename: job.DisplayFilename,
+		Visibility:      "public",
+		Status:          AliasStatusReady,
+	})
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (t *Transcoder) readyObject(ctx context.Context, sha256Hex string) (StoredObject, bool, error) {

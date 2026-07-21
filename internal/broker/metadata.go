@@ -203,6 +203,7 @@ func (s *PostgresMetadataStore) runMigrations(ctx context.Context) error {
 		`ALTER TABLE processing_jobs ADD COLUMN IF NOT EXISTS source_size_bytes bigint NOT NULL DEFAULT 0`,
 		`ALTER TABLE processing_jobs DROP CONSTRAINT IF EXISTS processing_jobs_status_check`,
 		`ALTER TABLE processing_jobs ADD CONSTRAINT processing_jobs_status_check CHECK (status IN ('queued', 'running', 'completed', 'failed', 'canceled'))`,
+		`ALTER TABLE processing_jobs DROP CONSTRAINT IF EXISTS processing_jobs_source_object_sha256_fkey`,
 		`CREATE INDEX IF NOT EXISTS processing_jobs_owner_created_idx ON processing_jobs(owner_subject, created_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS processing_jobs_queue_idx ON processing_jobs(status, created_at)`,
 		`CREATE TABLE IF NOT EXISTS object_derivatives (
@@ -213,6 +214,7 @@ func (s *PostgresMetadataStore) runMigrations(ctx context.Context) error {
 			created_at timestamptz NOT NULL DEFAULT now(),
 			PRIMARY KEY (source_object_sha256, profile)
 		)`,
+		`ALTER TABLE object_derivatives DROP CONSTRAINT IF EXISTS object_derivatives_source_object_sha256_fkey`,
 	} {
 		if _, err := conn.ExecContext(ctx, statement); err != nil {
 			return err
@@ -437,11 +439,12 @@ func (s *PostgresMetadataStore) CreateIngestJob(ctx context.Context, job Process
 		return ProcessingJob{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO processing_jobs
-		(id, owner_subject, alias_slug, staging_path, source_filename, source_content_type, source_size_bytes, profile, status)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'queued')`,
+		(id, owner_subject, alias_slug, source_object_sha256, staging_path, source_filename, source_content_type, source_size_bytes, profile, status)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'queued')`,
 		job.ID,
 		job.Owner,
 		job.AliasSlug,
+		nullString(job.SourceSHA256),
 		job.StagingPath,
 		job.DisplayFilename,
 		job.SourceType,
