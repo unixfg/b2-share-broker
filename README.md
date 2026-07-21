@@ -37,10 +37,19 @@ Unauthenticated public share link.
   URL.
 - Ready shares requested by known link unfurlers (Discord, Slack, iMessage,
   Mastodon, and similar crawlers) instead receive a minimal Open Graph page so
-  chat apps embed the media inline: `og:video*` tags point at the B2 object URL
-  (with dimensions when known), `og:image` uses the extracted video thumbnail
-  or the image object itself, and the share URL stays the permanent permalink.
-  Crawler fetches do not count as redirects.
+  chat apps embed the media inline: `og:video*` tags (with dimensions when
+  known) and `og:image` point back at the share host — `/s/{slug}/media` and
+  `/s/{slug}/thumbnail` — which redirect to the underlying B2 objects. Media
+  endpoint fetches count as opens so embed traffic is visible in stats;
+  thumbnail fetches do not. Crawler fetches of the unfurl page itself do not
+  count as redirects.
+
+### `GET /s/{slug}/media`, `GET /s/{slug}/thumbnail`
+
+Unauthenticated stable media URLs for a ready share. Both redirect to the B2
+object (video/file bytes or extracted JPEG thumbnail); only `/media` increments
+redirect stats. The thumbnail variant returns 404 when the object has no
+extracted thumbnail.
 
 The cluster does not proxy downloaded file bytes.
 

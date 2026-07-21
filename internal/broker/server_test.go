@@ -687,8 +687,9 @@ func TestPublicShareServesUnfurlPageToCrawlers(t *testing.T) {
 	metadata := newMemoryMetadata()
 	key := "01/" + testSHA256 + ".mp4"
 	thumbnailKey := "01/" + testSHA256 + ".jpg"
-	mediaURL := "https://bucket.s3.us-west-004.backblazeb2.com/" + key
-	thumbnailURL := "https://bucket.s3.us-west-004.backblazeb2.com/" + thumbnailKey
+	b2MediaURL := "https://bucket.s3.us-west-004.backblazeb2.com/" + key
+	ogMediaURL := "https://share.doesthings.online/s/ready.mp4/media"
+	ogThumbnailURL := "https://share.doesthings.online/s/ready.mp4/thumbnail"
 	metadata.objects[testSHA256] = StoredObject{SHA256: testSHA256, ObjectKey: key, Size: 12582912, ContentType: "video/mp4", Status: "ready", Width: 1920, Height: 1080, ThumbnailKey: thumbnailKey}
 	metadata.aliases["ready.mp4"] = ShareAlias{Slug: "ready.mp4", ObjectSHA256: testSHA256, ObjectKey: key, Owner: "user-1", DisplayFilename: "Launch Clip.mp4", Visibility: "public", Status: AliasStatusReady, ContentType: "video/mp4", Size: 12582912, Width: 1920, Height: 1080, ThumbnailKey: thumbnailKey}
 	server := NewServer(cfg, fakeAuth{err: ErrUnauthorized}, &fakeStore{}, metadata, slog.Default())
@@ -711,12 +712,12 @@ func TestPublicShareServesUnfurlPageToCrawlers(t *testing.T) {
 		`property="og:type" content="video.other"`,
 		`property="og:url" content="https://share.doesthings.online/s/ready.mp4"`,
 		`property="og:site_name" content="share.doesthings.online"`,
-		`property="og:video" content="` + mediaURL + `"`,
-		`property="og:video:secure_url" content="` + mediaURL + `"`,
+		`property="og:video" content="` + ogMediaURL + `"`,
+		`property="og:video:secure_url" content="` + ogMediaURL + `"`,
 		`property="og:video:type" content="video/mp4"`,
 		`property="og:video:width" content="1920"`,
 		`property="og:video:height" content="1080"`,
-		`property="og:image" content="` + thumbnailURL + `"`,
+		`property="og:image" content="` + ogThumbnailURL + `"`,
 		`name="theme-color"`,
 	} {
 		if !strings.Contains(body, want) {
@@ -731,8 +732,49 @@ func TestPublicShareServesUnfurlPageToCrawlers(t *testing.T) {
 	request.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)")
 	recorder = httptest.NewRecorder()
 	server.ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusFound || recorder.Header().Get("Location") != mediaURL {
+	if recorder.Code != http.StatusFound || recorder.Header().Get("Location") != b2MediaURL {
 		t.Fatalf("browser status = %d, location = %q", recorder.Code, recorder.Header().Get("Location"))
+	}
+}
+
+func TestPublicShareMediaVariantRedirectsAndCounts(t *testing.T) {
+	cfg := testConfig(t)
+	metadata := newMemoryMetadata()
+	key := "01/" + testSHA256 + ".mp4"
+	thumbnailKey := "01/" + testSHA256 + ".jpg"
+	metadata.objects[testSHA256] = StoredObject{SHA256: testSHA256, ObjectKey: key, Size: 12582912, ContentType: "video/mp4", Status: "ready", Width: 1920, Height: 1080, ThumbnailKey: thumbnailKey}
+	metadata.aliases["ready.mp4"] = ShareAlias{Slug: "ready.mp4", ObjectSHA256: testSHA256, ObjectKey: key, Owner: "user-1", DisplayFilename: "Launch Clip.mp4", Visibility: "public", Status: AliasStatusReady, ContentType: "video/mp4", Size: 12582912, Width: 1920, Height: 1080, ThumbnailKey: thumbnailKey}
+	metadata.aliases["pending.mp4"] = ShareAlias{Slug: "pending.mp4", Owner: "user-1", DisplayFilename: "pending.mp4", Visibility: "public", Status: AliasStatusPending}
+	metadata.aliases["plain.txt"] = ShareAlias{Slug: "plain.txt", ObjectSHA256: testSHA256, ObjectKey: key, Owner: "user-1", Visibility: "public", Status: AliasStatusReady, ContentType: "text/plain"}
+	server := NewServer(cfg, fakeAuth{err: ErrUnauthorized}, &fakeStore{}, metadata, slog.Default())
+
+	request := httptest.NewRequest(http.MethodGet, "/s/ready.mp4/media", nil)
+	recorder := httptest.NewRecorder()
+	server.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusFound || recorder.Header().Get("Location") != "https://bucket.s3.us-west-004.backblazeb2.com/"+key {
+		t.Fatalf("media status = %d, location = %q", recorder.Code, recorder.Header().Get("Location"))
+	}
+	if metadata.aliases["ready.mp4"].RedirectCount != 1 {
+		t.Fatalf("redirect count = %d, want 1", metadata.aliases["ready.mp4"].RedirectCount)
+	}
+
+	request = httptest.NewRequest(http.MethodGet, "/s/ready.mp4/thumbnail", nil)
+	recorder = httptest.NewRecorder()
+	server.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusFound || recorder.Header().Get("Location") != "https://bucket.s3.us-west-004.backblazeb2.com/"+thumbnailKey {
+		t.Fatalf("thumbnail status = %d, location = %q", recorder.Code, recorder.Header().Get("Location"))
+	}
+	if metadata.aliases["ready.mp4"].RedirectCount != 1 {
+		t.Fatalf("thumbnail fetch counted: redirect count = %d, want 1", metadata.aliases["ready.mp4"].RedirectCount)
+	}
+
+	for _, path := range []string{"/s/pending.mp4/media", "/s/plain.txt/thumbnail", "/s/missing.mp4/media"} {
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		recorder := httptest.NewRecorder()
+		server.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusNotFound {
+			t.Fatalf("%s status = %d, want %d", path, recorder.Code, http.StatusNotFound)
+		}
 	}
 }
 
