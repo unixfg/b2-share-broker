@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -19,6 +20,8 @@ type MediaProcessorRunner interface {
 	FastStartRemux(ctx context.Context, inputPath, outputPath string) error
 	TranscodeMP4(ctx context.Context, inputPath, outputPath string) error
 	IsWebMP4(ctx context.Context, inputPath string) (bool, error)
+	VideoDimensions(ctx context.Context, inputPath string) (int, int, error)
+	ExtractThumbnail(ctx context.Context, inputPath, outputPath string) error
 }
 
 type FFmpegMediaProcessor struct {
@@ -64,6 +67,58 @@ func (r FFmpegMediaProcessor) TranscodeMP4(ctx context.Context, inputPath, outpu
 		return fmt.Errorf("ffmpeg transcode failed: %w: %s", err, strings.TrimSpace(string(output)))
 	}
 	return nil
+}
+
+func (r FFmpegMediaProcessor) VideoDimensions(ctx context.Context, inputPath string) (int, int, error) {
+	command := exec.CommandContext(ctx, r.ffprobePath(),
+		"-v", "error",
+		"-select_streams", "v:0",
+		"-show_entries", "stream=width,height",
+		"-of", "csv=p=0",
+		inputPath,
+	)
+	output, err := command.Output()
+	if err != nil {
+		return 0, 0, fmt.Errorf("ffprobe dimensions failed: %w", err)
+	}
+	fields := strings.Split(strings.TrimSpace(string(output)), ",")
+	if len(fields) != 2 {
+		return 0, 0, fmt.Errorf("unexpected ffprobe dimensions output %q", strings.TrimSpace(string(output)))
+	}
+	width, err := strconv.Atoi(fields[0])
+	if err != nil {
+		return 0, 0, fmt.Errorf("unexpected ffprobe width %q: %w", fields[0], err)
+	}
+	height, err := strconv.Atoi(fields[1])
+	if err != nil {
+		return 0, 0, fmt.Errorf("unexpected ffprobe height %q: %w", fields[1], err)
+	}
+	return width, height, nil
+}
+
+func (r FFmpegMediaProcessor) ExtractThumbnail(ctx context.Context, inputPath, outputPath string) error {
+	var lastErr error
+	for _, seek := range []string{"1", "0"} {
+		command := exec.CommandContext(ctx, r.ffmpegPath(),
+			"-hide_banner",
+			"-y",
+			"-ss", seek,
+			"-i", inputPath,
+			"-frames:v", "1",
+			"-vf", "scale=min(1280,iw):-2",
+			"-q:v", "4",
+			outputPath,
+		)
+		output, err := command.CombinedOutput()
+		if err == nil {
+			if info, statErr := os.Stat(outputPath); statErr == nil && info.Size() > 0 {
+				return nil
+			}
+			err = fmt.Errorf("thumbnail output is empty")
+		}
+		lastErr = fmt.Errorf("ffmpeg thumbnail failed: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	return lastErr
 }
 
 func (r FFmpegMediaProcessor) IsWebMP4(ctx context.Context, inputPath string) (bool, error) {
@@ -217,6 +272,7 @@ func (t *Transcoder) processJob(ctx context.Context, job ProcessingJob) error {
 		if err != nil {
 			return err
 		}
+		t.enrichVideoMetadata(ctx, job, &video)
 		final = video
 	}
 	if final.WorkDir != "" {
@@ -270,6 +326,16 @@ func (t *Transcoder) processJob(ctx context.Context, job ProcessingJob) error {
 			FirstFilename: job.DisplayFilename,
 			Uploader:      job.Owner,
 			Status:        "ready",
+			Width:         final.Width,
+			Height:        final.Height,
+		}
+		if final.ThumbnailPath != "" {
+			thumbnailKey := GenerateObjectKey(sha256Hex, ".jpg")
+			if err := t.uploadThumbnail(ctx, thumbnailKey, final.ThumbnailPath); err != nil {
+				t.logger.Warn("failed to upload video thumbnail", "jobID", job.ID, "thumbnailKey", thumbnailKey, "error", err)
+			} else {
+				object.ThumbnailKey = thumbnailKey
+			}
 		}
 	}
 
@@ -301,10 +367,13 @@ func (t *Transcoder) processJob(ctx context.Context, job ProcessingJob) error {
 }
 
 type processedFile struct {
-	Path        string
-	ContentType string
-	Extension   string
-	WorkDir     string
+	Path          string
+	ContentType   string
+	Extension     string
+	WorkDir       string
+	Width         int
+	Height        int
+	ThumbnailPath string
 }
 
 func (t *Transcoder) normalizeVideo(ctx context.Context, job ProcessingJob) (processedFile, error) {
@@ -342,6 +411,42 @@ func (t *Transcoder) normalizeVideo(ctx context.Context, job ProcessingJob) (pro
 		return processedFile{}, err
 	}
 	return processedFile{Path: finalPath, ContentType: "video/mp4", Extension: ".mp4", WorkDir: workDir}, nil
+}
+
+func (t *Transcoder) enrichVideoMetadata(ctx context.Context, job ProcessingJob, final *processedFile) {
+	width, height, err := t.runner.VideoDimensions(ctx, final.Path)
+	if err != nil {
+		t.logger.Warn("failed to probe video dimensions", "jobID", job.ID, "error", err)
+	} else {
+		final.Width = width
+		final.Height = height
+	}
+	if final.WorkDir == "" {
+		return
+	}
+	thumbnailPath := filepath.Join(final.WorkDir, "thumbnail.jpg")
+	if err := t.runner.ExtractThumbnail(ctx, final.Path, thumbnailPath); err != nil {
+		t.logger.Warn("failed to extract video thumbnail", "jobID", job.ID, "error", err)
+		return
+	}
+	if info, err := os.Stat(thumbnailPath); err != nil || info.Size() == 0 {
+		return
+	}
+	final.ThumbnailPath = thumbnailPath
+}
+
+func (t *Transcoder) uploadThumbnail(ctx context.Context, thumbnailKey, thumbnailPath string) error {
+	file, err := os.Open(thumbnailPath)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	_, err = t.store.PutObject(ctx, thumbnailKey, "image/jpeg", info.Size(), file)
+	return err
 }
 
 func (t *Transcoder) reuseDerivative(ctx context.Context, job ProcessingJob) (bool, error) {

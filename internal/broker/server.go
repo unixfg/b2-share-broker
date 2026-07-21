@@ -135,6 +135,10 @@ func (s *Server) handlePublicShare(w http.ResponseWriter, r *http.Request) {
 			writeShareStatusPage(w, r, http.StatusAccepted, "Processing", "This share is still being prepared.")
 			return
 		}
+		if isUnfurlAgent(r.UserAgent()) {
+			s.writeShareUnfurlPage(w, r, alias)
+			return
+		}
 		if err := s.metadata.RecordAliasRedirect(r.Context(), slug); err != nil {
 			s.logger.Warn("failed to record share redirect", "slug", slug, "error", err)
 		}
@@ -416,9 +420,12 @@ func (s *Server) handleShare(w http.ResponseWriter, r *http.Request) {
 			s.logger.Warn("failed to remove staged upload", "path", stagingPath, "error", err)
 		}
 	}
-	if deleted.ObjectKey != "" {
-		if err := s.store.DeleteObject(r.Context(), deleted.ObjectKey); err != nil {
-			s.logger.Warn("failed to delete unreferenced B2 object", "objectKey", deleted.ObjectKey, "error", err)
+	for _, key := range []string{deleted.ObjectKey, deleted.ThumbnailKey} {
+		if key == "" {
+			continue
+		}
+		if err := s.store.DeleteObject(r.Context(), key); err != nil {
+			s.logger.Warn("failed to delete unreferenced B2 object", "objectKey", key, "error", err)
 		}
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -676,6 +683,140 @@ func writeShareStatusPage(w http.ResponseWriter, r *http.Request, statusCode int
 		return
 	}
 	_, _ = fmt.Fprintf(w, "<!doctype html><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>%s</title><body><main><h1>%s</h1><p>%s</p></main></body>", htmlEscape(title), htmlEscape(title), htmlEscape(message))
+}
+
+var unfurlAgentNeedles = []string{
+	"discordbot",
+	"slackbot",
+	"twitterbot",
+	"facebookexternalhit",
+	"whatsapp",
+	"telegrambot",
+	"linkedinbot",
+	"applebot",
+	"mastodon",
+	"bluesky",
+	"cardyb",
+	"signal",
+	"skypeuripreview",
+	"pinterest",
+	"redditbot",
+	"viber",
+}
+
+func isUnfurlAgent(userAgent string) bool {
+	userAgent = strings.ToLower(userAgent)
+	for _, needle := range unfurlAgentNeedles {
+		if strings.Contains(userAgent, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) writeShareUnfurlPage(w http.ResponseWriter, r *http.Request, alias ShareAlias) {
+	shareURL := ShareURL(s.cfg.PublicBaseURL, alias.Slug)
+	mediaURL := PublicURL(s.cfg.B2PublicBaseURL, alias.ObjectKey)
+
+	var tags strings.Builder
+	writeProperty := func(property, content string) {
+		if content == "" {
+			return
+		}
+		tags.WriteString(`<meta property="` + property + `" content="` + htmlEscape(content) + `">`)
+	}
+	writeName := func(name, content string) {
+		if content == "" {
+			return
+		}
+		tags.WriteString(`<meta name="` + name + `" content="` + htmlEscape(content) + `">`)
+	}
+
+	description := shareUnfurlDescription(alias)
+	writeProperty("og:title", alias.DisplayFilename)
+	writeProperty("og:url", shareURL)
+	writeProperty("og:site_name", shareSiteName(s.cfg.PublicBaseURL))
+	writeProperty("og:description", description)
+	writeName("description", description)
+	writeName("theme-color", "#5865F2")
+
+	imageURL := ""
+	isVideo := strings.HasPrefix(alias.ContentType, "video/")
+	switch {
+	case isVideo:
+		writeProperty("og:type", "video.other")
+		writeProperty("og:video", mediaURL)
+		writeProperty("og:video:secure_url", mediaURL)
+		writeProperty("og:video:type", alias.ContentType)
+		if alias.Width > 0 {
+			writeProperty("og:video:width", strconv.Itoa(alias.Width))
+		}
+		if alias.Height > 0 {
+			writeProperty("og:video:height", strconv.Itoa(alias.Height))
+		}
+		if alias.ThumbnailKey != "" {
+			imageURL = PublicURL(s.cfg.B2PublicBaseURL, alias.ThumbnailKey)
+		}
+	case strings.HasPrefix(alias.ContentType, "image/"):
+		writeProperty("og:type", "website")
+		imageURL = mediaURL
+	default:
+		writeProperty("og:type", "website")
+	}
+	if imageURL != "" {
+		writeProperty("og:image", imageURL)
+		writeName("twitter:card", "summary_large_image")
+	}
+	writeName("twitter:title", alias.DisplayFilename)
+	writeName("twitter:description", description)
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "public, max-age=60")
+	w.WriteHeader(http.StatusOK)
+	if r.Method == http.MethodHead {
+		return
+	}
+	_, _ = fmt.Fprintf(w, "<!doctype html><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">%s<title>%s</title><body><main><h1>%s</h1><p><a href=\"%s\">Download or play %s</a></p></main></body>",
+		tags.String(),
+		htmlEscape(alias.DisplayFilename),
+		htmlEscape(alias.DisplayFilename),
+		htmlEscape(mediaURL),
+		htmlEscape(alias.DisplayFilename),
+	)
+}
+
+func shareUnfurlDescription(alias ShareAlias) string {
+	parts := []string{}
+	if alias.ContentType != "" {
+		parts = append(parts, alias.ContentType)
+	}
+	if alias.Size > 0 {
+		parts = append(parts, formatShareBytes(alias.Size))
+	}
+	return strings.Join(parts, " · ")
+}
+
+func formatShareBytes(size int64) string {
+	const unit = 1024
+	if size < unit {
+		return fmt.Sprintf("%d B", size)
+	}
+	value := float64(size)
+	for _, suffix := range []string{"KB", "MB", "GB", "TB"} {
+		value /= unit
+		if value < unit {
+			return fmt.Sprintf("%.1f %s", value, suffix)
+		}
+	}
+	return fmt.Sprintf("%.1f PB", value)
+}
+
+func shareSiteName(publicBaseURL string) string {
+	parsed, err := url.Parse(publicBaseURL)
+	if err != nil || parsed.Host == "" {
+		return strings.TrimRight(publicBaseURL, "/")
+	}
+	return parsed.Host
 }
 
 func writeShareRedirect(w http.ResponseWriter, location, contentType string) {
