@@ -264,6 +264,35 @@ func TestProcessorEnrichesVideoObjectWithDimensionsAndThumbnail(t *testing.T) {
 	}
 }
 
+func TestParseVideoDimensions(t *testing.T) {
+	tests := []struct {
+		output        string
+		width, height int
+		wantErr       bool
+	}{
+		{output: "640,480", width: 640, height: 480},
+		{output: "1080,1920\n", width: 1080, height: 1920},
+		{output: "1080,1920,", width: 1080, height: 1920},
+		{output: "1920,1080,0,0", width: 1920, height: 1080},
+		{output: "", wantErr: true},
+		{output: "1080", wantErr: true},
+		{output: "wide,480", wantErr: true},
+		{output: "1080,tall", wantErr: true},
+	}
+	for _, test := range tests {
+		width, height, err := parseVideoDimensions(test.output)
+		if test.wantErr {
+			if err == nil {
+				t.Fatalf("parseVideoDimensions(%q) = %d,%d, want error", test.output, width, height)
+			}
+			continue
+		}
+		if err != nil || width != test.width || height != test.height {
+			t.Fatalf("parseVideoDimensions(%q) = %d,%d,%v, want %d,%d", test.output, width, height, err, test.width, test.height)
+		}
+	}
+}
+
 func TestProcessorSkipsUploadWhenReadyObjectStillExists(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.TranscoderWorkDir = t.TempDir()
