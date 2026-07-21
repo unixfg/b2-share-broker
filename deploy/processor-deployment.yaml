@@ -1,0 +1,160 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: b2-share-processor
+  namespace: b2-share-broker
+  labels:
+    app.kubernetes.io/name: b2-share-broker
+    app.kubernetes.io/component: processor
+spec:
+  replicas: 1
+  revisionHistoryLimit: 2
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: b2-share-broker
+      app.kubernetes.io/component: processor
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: b2-share-broker
+        app.kubernetes.io/component: processor
+    spec:
+      # Required for NVENC video transcoding. Drop this and the GPU resource
+      # below if you don't need video normalization (non-video uploads still
+      # work, but video uploads will fail to transcode to H.264/AAC MP4).
+      runtimeClassName: nvidia
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
+      # Optional: pin the processor to a node with the GPU and tolerations it
+      # needs. Uncomment and adjust for your cluster.
+      # affinity:
+      #   nodeAffinity:
+      #     requiredDuringSchedulingIgnoredDuringExecution:
+      #       nodeSelectorTerms:
+      #         - matchExpressions:
+      #             - key: kubernetes.io/hostname
+      #               operator: In
+      #               values:
+      #                 - fileserver.example.invalid
+      # tolerations:
+      #   - key: dedicated
+      #     operator: Equal
+      #     value: media
+      #     effect: NoSchedule
+      containers:
+        - name: processor
+          # Pin to a digest in production (e.g. :main@sha256:<digest>) so
+          # rollouts are explicit. The floating :main tag is convenient for
+          # examples.
+          image: ghcr.io/unixfg/b2-share-broker:main
+          imagePullPolicy: IfNotPresent
+          command:
+            - /usr/local/bin/b2-share-processor
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: b2-share-broker-config
+          env:
+            - name: B2_ENDPOINT
+              valueFrom:
+                secretKeyRef:
+                  name: b2-share-broker-secrets
+                  key: B2_ENDPOINT
+            - name: B2_BUCKET
+              valueFrom:
+                secretKeyRef:
+                  name: b2-share-broker-secrets
+                  key: B2_BUCKET
+            - name: B2_PUBLIC_BASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: b2-share-broker-secrets
+                  key: B2_PUBLIC_BASE_URL
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: b2-share-broker-secrets
+                  key: AWS_ACCESS_KEY_ID
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: b2-share-broker-secrets
+                  key: AWS_SECRET_ACCESS_KEY
+            - name: OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: b2-share-broker-secrets
+                  key: OIDC_CLIENT_SECRET
+            - name: SESSION_AUTH_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: b2-share-broker-secrets
+                  key: SESSION_AUTH_KEY
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: b2-share-broker-secrets
+                  key: DATABASE_URL
+          volumeMounts:
+            - name: staging
+              mountPath: /staging
+            - name: work
+              mountPath: /work
+            - name: tmp
+              mountPath: /tmp
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+              ephemeral-storage: 2Gi
+              # Drop this if you don't need NVENC video transcoding.
+              nvidia.com/gpu: "1"
+            limits:
+              cpu: "4"
+              memory: 4Gi
+              ephemeral-storage: 8Gi
+              # Drop this if you don't need NVENC video transcoding.
+              nvidia.com/gpu: "1"
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+      volumes:
+        - name: staging
+          persistentVolumeClaim:
+            claimName: b2-share-staging
+        - name: work
+          emptyDir:
+            sizeLimit: 8Gi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 2Gi
