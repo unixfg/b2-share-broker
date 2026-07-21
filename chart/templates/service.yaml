@@ -22,7 +22,7 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ .Chart.Name }}-processor
+  name: {{ include "b2-share-broker.shortName" . }}-processor
   namespace: {{ include "b2-share-broker.namespace" . }}
   labels:
     {{- include "b2-share-broker.labels" . | nindent 4 }}
