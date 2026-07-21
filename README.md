@@ -85,7 +85,9 @@ Requires owner auth. Browser requests also require `X-CSRF-Token`.
 Deletion keeps the alias row as soft-deleted metadata so redirect counts and
 history survive. Staged files and queued jobs for that alias are removed or
 canceled. The B2 object is hard-deleted only when no non-deleted aliases still
-reference it.
+reference it. Because B2 buckets are always versioned and a key-only S3 delete
+only hides the latest version, hard deletion removes every version and hide
+marker for the object key by version ID.
 
 ## Object Storage
 

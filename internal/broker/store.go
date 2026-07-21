@@ -96,9 +96,44 @@ func (s *B2Store) PutObject(ctx context.Context, key, contentType string, size i
 }
 
 func (s *B2Store) DeleteObject(ctx context.Context, key string) error {
-	_, err := s.client.DeleteObject(ctx, &s3.DeleteObjectInput{
+	// B2 buckets are always versioned, and an S3 DeleteObject that names only
+	// the key creates a hide marker instead of removing data. Delete every
+	// version and hide marker for the key by version ID so the bytes are
+	// actually removed from the bucket.
+	paginator := s3.NewListObjectVersionsPaginator(s.client, &s3.ListObjectVersionsInput{
 		Bucket: aws.String(s.bucket),
-		Key:    aws.String(key),
+		Prefix: aws.String(key),
+	})
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			return err
+		}
+		for _, version := range page.Versions {
+			if aws.ToString(version.Key) != key {
+				continue
+			}
+			if err := s.deleteVersion(ctx, version.Key, version.VersionId); err != nil {
+				return err
+			}
+		}
+		for _, marker := range page.DeleteMarkers {
+			if aws.ToString(marker.Key) != key {
+				continue
+			}
+			if err := s.deleteVersion(ctx, marker.Key, marker.VersionId); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (s *B2Store) deleteVersion(ctx context.Context, key, versionID *string) error {
+	_, err := s.client.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket:    aws.String(s.bucket),
+		Key:       key,
+		VersionId: versionID,
 	})
 	return err
 }
