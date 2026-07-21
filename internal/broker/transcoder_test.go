@@ -138,6 +138,82 @@ func TestProcessorTranscodesWhenRemuxIsNotWebMP4(t *testing.T) {
 	}
 }
 
+func TestProcessorReusesDerivativeForDuplicateSource(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.TranscoderWorkDir = t.TempDir()
+	stagingPath := filepath.Join(cfg.StagingDir, "job-2.mp4.upload")
+	if err := os.WriteFile(stagingPath, []byte("source"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sourceSHA := sha256Hex([]byte("source"))
+	targetSHA := sha256Hex([]byte("existing-mp4"))
+	targetKey := targetSHA[:2] + "/" + targetSHA + ".mp4"
+	metadata := newMemoryMetadata()
+	metadata.objects[targetSHA] = StoredObject{SHA256: targetSHA, ObjectKey: targetKey, Size: 12, ContentType: "video/mp4", Extension: ".mp4", Status: "ready"}
+	metadata.derivatives[sourceSHA+"|"+ProcessingProfileMP4Web] = ObjectDerivative{SourceSHA256: sourceSHA, TargetSHA256: targetSHA, Profile: ProcessingProfileMP4Web, JobID: "job-1"}
+	metadata.aliases["mine.mp4"] = ShareAlias{Slug: "mine.mp4", Owner: "user-1", DisplayFilename: "input.mkv", Visibility: "public", Status: AliasStatusPending}
+	metadata.jobs["job-2"] = ProcessingJob{ID: "job-2", Owner: "user-1", AliasSlug: "mine.mp4", SourceSHA256: sourceSHA, StagingPath: stagingPath, Profile: ProcessingProfileMP4Web, Status: ProcessingStatusQueued, DisplayFilename: "input.mkv", SourceType: "video/x-matroska"}
+	store := &fakeStore{objects: map[string][]byte{targetKey: []byte("existing-mp4")}}
+	runner := fakeMediaRunner{remuxErr: errors.New("remux must not run"), transcodeErr: errors.New("transcode must not run")}
+	transcoder := NewTranscoder(cfg, store, metadata, runner, slog.Default())
+
+	processed, err := transcoder.ProcessNext(context.Background())
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !processed {
+		t.Fatal("expected a job to be processed")
+	}
+	if metadata.jobs["job-2"].Status != ProcessingStatusCompleted {
+		t.Fatalf("job = %#v", metadata.jobs["job-2"])
+	}
+	if metadata.aliases["mine.mp4"].ObjectSHA256 != targetSHA || metadata.aliases["mine.mp4"].Status != AliasStatusReady {
+		t.Fatalf("alias = %#v", metadata.aliases["mine.mp4"])
+	}
+	if store.putKey != "" {
+		t.Fatalf("unexpected upload to %q", store.putKey)
+	}
+	if _, err := os.Stat(stagingPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("staging file still exists or stat failed unexpectedly: %v", err)
+	}
+}
+
+func TestProcessorTranscodesWhenDerivativeTargetIsUnavailable(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.TranscoderWorkDir = t.TempDir()
+	stagingPath := filepath.Join(cfg.StagingDir, "job-2.mp4.upload")
+	if err := os.WriteFile(stagingPath, []byte("source"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sourceSHA := sha256Hex([]byte("source"))
+	targetSHA := sha256Hex([]byte("missing-mp4"))
+	targetKey := targetSHA[:2] + "/" + targetSHA + ".mp4"
+	transcoded := []byte("transcoded-output")
+	metadata := newMemoryMetadata()
+	metadata.objects[targetSHA] = StoredObject{SHA256: targetSHA, ObjectKey: targetKey, Size: 11, ContentType: "video/mp4", Extension: ".mp4", Status: "ready"}
+	metadata.derivatives[sourceSHA+"|"+ProcessingProfileMP4Web] = ObjectDerivative{SourceSHA256: sourceSHA, TargetSHA256: targetSHA, Profile: ProcessingProfileMP4Web, JobID: "job-1"}
+	metadata.aliases["mine.mp4"] = ShareAlias{Slug: "mine.mp4", Owner: "user-1", DisplayFilename: "input.mkv", Visibility: "public", Status: AliasStatusPending}
+	metadata.jobs["job-2"] = ProcessingJob{ID: "job-2", Owner: "user-1", AliasSlug: "mine.mp4", SourceSHA256: sourceSHA, StagingPath: stagingPath, Profile: ProcessingProfileMP4Web, Status: ProcessingStatusQueued, DisplayFilename: "input.mkv", SourceType: "video/x-matroska"}
+	store := &fakeStore{headErr: errors.New("missing")}
+	transcoder := NewTranscoder(cfg, store, metadata, fakeMediaRunner{remuxOutput: []byte("remux"), transcodeOutput: transcoded}, slog.Default())
+
+	processed, err := transcoder.ProcessNext(context.Background())
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !processed {
+		t.Fatal("expected a job to be processed")
+	}
+	if metadata.aliases["mine.mp4"].ObjectSHA256 != sha256Hex(transcoded) {
+		t.Fatalf("alias = %#v", metadata.aliases["mine.mp4"])
+	}
+	if len(metadata.unavailable) != 1 || metadata.unavailable[0] != targetSHA {
+		t.Fatalf("unavailable = %#v", metadata.unavailable)
+	}
+}
+
 func TestProcessorSkipsUploadWhenReadyObjectStillExists(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.TranscoderWorkDir = t.TempDir()

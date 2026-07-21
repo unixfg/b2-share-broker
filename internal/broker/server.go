@@ -1,6 +1,8 @@
 package broker
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -271,6 +273,7 @@ func (s *Server) handleCreateUpload(w http.ResponseWriter, r *http.Request) {
 		ID:              jobID,
 		Owner:           authenticated.Principal.Subject,
 		AliasSlug:       slug,
+		SourceSHA256:    upload.sha256,
 		StagingPath:     upload.stagingPath,
 		Profile:         upload.profile,
 		Status:          ProcessingStatusQueued,
@@ -447,6 +450,7 @@ type stagedMultipartUpload struct {
 	profile        string
 	stagingPath    string
 	size           int64
+	sha256         string
 }
 
 func (s *Server) stageMultipartUpload(r *http.Request, reader *multipart.Reader, jobID string) (stagedMultipartUpload, error) {
@@ -489,7 +493,7 @@ func (s *Server) stageMultipartUpload(r *http.Request, reader *multipart.Reader,
 				contentType = normalizedContentType(contentType)
 				profile = ProcessingProfileMP4Web
 			}
-			stagingPath, size, err := s.stageUpload(jobID, finalExtension, part)
+			stagingPath, size, sourceSHA256, err := s.stageUpload(jobID, finalExtension, part)
 			closeErr := part.Close()
 			if err != nil {
 				cleanup()
@@ -507,6 +511,7 @@ func (s *Server) stageMultipartUpload(r *http.Request, reader *multipart.Reader,
 				profile:        profile,
 				stagingPath:    stagingPath,
 				size:           size,
+				sha256:         sourceSHA256,
 			}
 		case "alias":
 			value, err := io.ReadAll(io.LimitReader(part, 4097))
@@ -574,33 +579,34 @@ func (s *Server) writeMultipartError(w http.ResponseWriter, r *http.Request, err
 	writeJSONError(w, http.StatusBadRequest, "multipart file upload is invalid")
 }
 
-func (s *Server) stageUpload(jobID, extension string, reader io.Reader) (string, int64, error) {
+func (s *Server) stageUpload(jobID, extension string, reader io.Reader) (string, int64, string, error) {
 	if err := os.MkdirAll(s.cfg.StagingDir, 0o700); err != nil {
-		return "", 0, err
+		return "", 0, "", err
 	}
 	name := safeFilename(jobID) + extension + ".upload"
 	path := filepath.Join(s.cfg.StagingDir, name)
 	tempPath := path + ".tmp"
 	output, err := os.OpenFile(tempPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 	if err != nil {
-		return "", 0, err
+		return "", 0, "", err
 	}
 	limited := &limitedWriter{Writer: output, Limit: s.cfg.MaxUploadBytes}
-	_, copyErr := io.Copy(limited, reader)
+	hash := sha256.New()
+	_, copyErr := io.Copy(io.MultiWriter(limited, hash), reader)
 	closeErr := output.Close()
 	if copyErr != nil {
 		_ = os.Remove(tempPath)
-		return "", 0, copyErr
+		return "", 0, "", copyErr
 	}
 	if closeErr != nil {
 		_ = os.Remove(tempPath)
-		return "", 0, closeErr
+		return "", 0, "", closeErr
 	}
 	if err := os.Rename(tempPath, path); err != nil {
 		_ = os.Remove(tempPath)
-		return "", 0, err
+		return "", 0, "", err
 	}
-	return path, limited.Written, nil
+	return path, limited.Written, hex.EncodeToString(hash.Sum(nil)), nil
 }
 
 type limitedWriter struct {

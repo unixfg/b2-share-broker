@@ -121,6 +121,13 @@ If remux fails or the remuxed MP4 is not H.264/AAC, the processor transcodes to
 H.264/AAC MP4 with `h264_nvenc`. Original uploaded bytes are temporary staging
 files and are not uploaded to the public bucket.
 
+Each upload's source bytes are hashed while streaming to staging and recorded on
+the job. Completed jobs record a derivative from that source hash to the final
+object per processing profile. A later upload of the same source bytes reuses
+the existing ready object after the same `HEAD` verification and skips remux,
+transcode, and upload entirely; aliases referencing one object share it until
+the last non-deleted alias is removed.
+
 ## Configuration
 
 Required environment variables:
