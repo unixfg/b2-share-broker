@@ -1,0 +1,28 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: b2-share-broker-config
+  namespace: b2-share-broker
+  labels:
+    app.kubernetes.io/name: b2-share-broker
+    app.kubernetes.io/component: api
+data:
+  PORT: "8080"
+  # Replace with your Keycloak issuer URL.
+  OIDC_ISSUER_URL: https://keycloak.example.invalid/realms/yourrealm
+  OIDC_CLIENT_ID: b2-share-web
+  OIDC_AUDIENCE: b2-share-web
+  OIDC_REQUIRED_ROLES: b2-share-user
+  # Replace with the public host you serve the app from.
+  PUBLIC_BASE_URL: https://share.example.invalid
+  # Optional: comma-separated exact origins allowed to read public /s/* redirect
+  # responses with CORS. Leave empty to disable CORS on public redirects.
+  PUBLIC_SHARE_CORS_ALLOWED_ORIGINS: ""
+  # Replace with your B2 / S3-compatible region.
+  B2_REGION: us-west-004
+  MAX_UPLOAD_BYTES: "2147483648"
+  SESSION_TTL_SECONDS: "43200"
+  FFMPEG_PATH: /usr/bin/ffmpeg
+  TRANSCODER_WORK_DIR: /work
+  TRANSCODER_POLL_SECONDS: "5"
+  STAGING_DIR: /staging

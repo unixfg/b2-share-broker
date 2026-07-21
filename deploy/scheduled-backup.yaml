@@ -1,0 +1,12 @@
+apiVersion: postgresql.cnpg.io/v1
+kind: ScheduledBackup
+metadata:
+  name: b2-share-broker-pg-daily-backup
+  namespace: b2-share-broker
+spec:
+  schedule: "0 0 9 * * *"
+  backupOwnerReference: self
+  cluster:
+    name: b2-share-broker-pg
+  method: barmanObjectStore
+  target: prefer-standby

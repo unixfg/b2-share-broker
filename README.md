@@ -9,6 +9,25 @@ single internal processor stages the bytes, normalizes video to web-friendly
 MP4, hashes the final bytes, uploads only the final object to B2, and marks the
 share ready.
 
+## Runtime Shape
+
+The app runs as two deployments plus a Postgres cluster:
+
+- `b2-share-broker`: 2 HA replicas for UI, auth/session, history, and public
+  redirects. Spread across nodes with `topologySpreadConstraints`; no GPU
+  required.
+- `b2-share-processor`: 1 replica using the `nvidia` RuntimeClass and one
+  time-sliced `nvidia.com/gpu` share for video normalization. It exposes only
+  the same internal HTTP API service used by the shared public route. Drop the
+  GPU resource and `runtimeClassName` if you don't need video transcoding.
+- `b2-share-broker-pg`: 3-instance CloudNativePG metadata database with B2
+  backups.
+- `b2-share-staging`: 20Gi RWO PVC for temporary upload staging.
+
+`MAX_UPLOAD_BYTES` defaults to 2GiB for browser/PWA video uploads. Upload
+files stream directly into staging rather than spilling through multipart
+parser temp files.
+
 ## Web App
 
 - `GET /` serves the fallback browser upload UI.
@@ -226,14 +245,52 @@ Minimum client settings:
 Grant users a realm role or `b2-share-web` client role matching
 `OIDC_REQUIRED_ROLES`, normally `b2-share-user`.
 
-## GitOps Deployment
+## Deployment
 
-The bees deployment lives in `github.com/unixfg/gitops` under
-`apps/b2-share-broker`.
+Example Kubernetes manifests live under `deploy/` in this repository. They are
+a kustomize base: namespace, ConfigMap, the two Deployments, a Service for
+each, a PodDisruptionBudget for the HA broker pods, a 20Gi staging PVC, and a
+CloudNativePG `Cluster` plus `ScheduledBackup`.
 
-Before merging the GitOps PR, set the SOPS-managed B2 application key,
-`OIDC_CLIENT_SECRET`, `SESSION_AUTH_KEY`, and Postgres credentials. User access
-is controlled by Keycloak roles, not a ConfigMap subject list.
+```bash
+kustomize build deploy | kubectl apply -f -
+```
+
+The ConfigMap ships with placeholder values (`share.example.invalid`,
+`keycloak.example.invalid`, `us-west-004`). Patch them in an overlay or edit
+`deploy/configmap.yaml` directly for a single-cluster deploy.
+
+### Required secrets
+
+The Deployments read these Secret keys by name; create them before applying:
+
+`b2-share-broker-secrets`:
+
+- `B2_ENDPOINT`, `B2_BUCKET`, `B2_PUBLIC_BASE_URL`
+- `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`
+- `OIDC_CLIENT_SECRET`
+- `SESSION_AUTH_KEY` (at least 32 bytes, or base64 of at least 32 bytes)
+- `DATABASE_URL`
+
+The B2 application key must be able to read, write, `HEAD`, and delete
+hash-sharded objects at the bucket root (there is no `s/` object prefix).
+
+`b2-share-broker-db` (CNPG bootstrap superuser credentials) and
+`b2-share-broker-b2-credentials` (`ACCESS_KEY_ID` / `ACCESS_SECRET_KEY` used by
+CNPG for B2 backups) are referenced by `deploy/cluster.yaml`.
+
+User access is controlled by Keycloak roles, not a ConfigMap subject list.
+
+### Image
+
+The Deployments reference `ghcr.io/unixfg/b2-share-broker:main`. In production
+pin to a digest (`:main@sha256:<digest>`) and bump it deliberately.
+
+### Reference overlay
+
+The bees cluster's full overlay (real URLs, bucket name, node affinity,
+digest pin, SOPS secrets, Traefik routes, Gatus endpoint) lives in
+`github.com/unixfg/gitops` under `apps/b2-share-broker`.
 
 ## Development
 
