@@ -35,6 +35,11 @@ Three binaries are built from one Go module and shipped in one image
 - `Dockerfile`: single image for all binaries; runtime is
   `debian:bookworm-slim` + `jellyfin-ffmpeg7` (NOT Alpine ffmpeg — see
   "Hard-won facts" below).
+- `chart/`: Helm chart published as an OCI artifact to
+  `ghcr.io/unixfg/b2-share-broker`. Deployment manifests for the broker,
+  processor, CNPG cluster, PDBs, staging PVC, and optional Ingress.
+- `docker-compose.yaml`: local dev stack (broker + processor + postgres
+  behind traefik). Mirrors production routing.
 
 ## Build and test
 
@@ -60,16 +65,22 @@ Notes:
 
 ## CI/CD and deployment
 
-1. PR into `main` (squash merge). CI runs tests; image builds only run on
-   `main` pushes and publish `ghcr.io/unixfg/b2-share-broker:main` and
-   `:sha-<commit>`.
-2. Deployment lives in `github.com/unixfg/gitops` under `apps/b2-share-broker`.
-   Both `base/deployment.yaml` and `base/processor-deployment.yaml` pin
-   `:main@sha256:<digest>`. Bump both in one gitops PR and merge; Argo CD
-   syncs normally. Never mutate the cluster directly for app changes.
+1. PR into `main` (squash merge). CI runs tests, `helm lint chart/`, and
+   `helm template chart/`; image and chart builds only run on `main` pushes
+   and publish:
+   - `ghcr.io/unixfg/b2-share-broker:main` and `:sha-<commit>` (OCI image)
+   - `ghcr.io/unixfg/b2-share-broker:<chart-version>` (OCI Helm chart artifact)
+2. Deployment lives in `github.com/unixfg/gitops` under `apps/b2-share-broker`
+   as an Argo CD Application sourcing the published Helm chart. Bees-specific
+   values (real URLs, node affinity, image digest, storage classes) are
+   inline in `apps/b2-share-broker/helm/bees/application.yaml`. Bump
+   `targetRevision` to the new chart version and `image.digest` to the new
+   image digest in one gitops PR and merge; Argo CD syncs normally. Never
+   mutate the cluster directly for app changes.
 3. Verify the digest before opening the gitops PR:
    `skopeo inspect docker://ghcr.io/unixfg/b2-share-broker:main` must equal
-   `:sha-<merge commit>`.
+   `:sha-<merge commit>`. Bump `version` in `chart/Chart.yaml` when chart
+   templates change so the chart artifact republishes.
 
 ## Database conventions
 

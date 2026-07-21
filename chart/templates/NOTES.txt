@@ -1,0 +1,28 @@
+b2-share-broker has been deployed.
+
+1. Ensure the Secret {{ .Values.secrets.existingSecret }} exists in namespace
+   {{ include "b2-share-broker.namespace" . }} with keys:
+   B2_ENDPOINT, B2_BUCKET, B2_PUBLIC_BASE_URL, AWS_ACCESS_KEY_ID,
+   AWS_SECRET_ACCESS_KEY, OIDC_CLIENT_SECRET, SESSION_AUTH_KEY, DATABASE_URL
+
+{{- if .Values.cnpg.enabled }}
+2. Ensure the CNPG bootstrap secret {{ .Values.cnpg.credentials.existingSecret }}
+   exists with username and password keys.
+
+3. Ensure the CNPG backup credentials secret
+   {{ .Values.cnpg.backupCredentials.existingSecret }} exists with
+   ACCESS_KEY_ID and ACCESS_SECRET_KEY keys.
+{{- end }}
+
+{{- if .Values.processor.enabled }}
+4. The processor is pinned to the {{ .Values.processor.runtimeClassName | default "default" }} runtime class.
+{{- if .Values.processor.gpu.enabled }}
+   NVENC video transcoding is enabled with {{ .Values.processor.gpu.count }} GPU share(s).
+{{- else }}
+   GPU is disabled. Video uploads that need transcoding will fail; remux of H.264/AAC still works.
+{{- end }}
+{{- end }}
+
+Get the app URL by running:
+  kubectl port-forward -n {{ include "b2-share-broker.namespace" . }} svc/{{ .Chart.Name }} 8080:8080
+  open http://localhost:8080

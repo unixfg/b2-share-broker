@@ -247,24 +247,29 @@ Grant users a realm role or `b2-share-web` client role matching
 
 ## Deployment
 
-Example Kubernetes manifests live under `deploy/` in this repository. They are
-a kustomize base: namespace, ConfigMap, the two Deployments, a Service for
-each, a PodDisruptionBudget for the HA broker pods, a 20Gi staging PVC, and a
-CloudNativePG `Cluster` plus `ScheduledBackup`.
+A Helm chart lives under `chart/` in this repository and is published as an
+OCI artifact to `ghcr.io/unixfg/b2-share-broker`. It installs the two
+Deployments (broker + processor), a Service for each, a ConfigMap, a PDB for
+the broker, a staging PVC, and a CloudNativePG `Cluster` + `ScheduledBackup`
+when `cnpg.enabled` is `true`.
 
 ```bash
-kustomize build deploy | kubectl apply -f -
+helm install b2-share-broker oci://ghcr.io/unixfg/b2-share-broker \
+  --version 0.1.0 \
+  --namespace b2-share-broker \
+  --create-namespace \
+  -f values.yaml
 ```
 
-The ConfigMap ships with placeholder values (`share.example.invalid`,
-`keycloak.example.invalid`, `us-west-004`). Patch them in an overlay or edit
-`deploy/configmap.yaml` directly for a single-cluster deploy.
+See `chart/README.md` for the full values reference. The defaults in
+`chart/values.yaml` are placeholders (`share.example.invalid`,
+`keycloak.example.invalid`, empty storage classes) — override them in a
+values file or with `--set`.
 
 ### Required secrets
 
-The Deployments read these Secret keys by name; create them before applying:
-
-`b2-share-broker-secrets`:
+Before installing, create a Secret (named `b2-share-broker-secrets` by
+default, override via `secrets.existingSecret`) with these keys:
 
 - `B2_ENDPOINT`, `B2_BUCKET`, `B2_PUBLIC_BASE_URL`
 - `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`
@@ -275,22 +280,42 @@ The Deployments read these Secret keys by name; create them before applying:
 The B2 application key must be able to read, write, `HEAD`, and delete
 hash-sharded objects at the bucket root (there is no `s/` object prefix).
 
-`b2-share-broker-db` (CNPG bootstrap superuser credentials) and
-`b2-share-broker-b2-credentials` (`ACCESS_KEY_ID` / `ACCESS_SECRET_KEY` used by
-CNPG for B2 backups) are referenced by `deploy/cluster.yaml`.
+When `cnpg.enabled` is `true` (default), also create:
+- `b2-share-broker-db` — CNPG bootstrap secret with `username` and `password`
+- `b2-share-broker-b2-credentials` — CNPG backup credentials with
+  `ACCESS_KEY_ID` and `ACCESS_SECRET_KEY`
 
-User access is controlled by Keycloak roles, not a ConfigMap subject list.
+User access is controlled by OIDC roles, not a ConfigMap subject list.
 
 ### Image
 
-The Deployments reference `ghcr.io/unixfg/b2-share-broker:main`. In production
-pin to a digest (`:main@sha256:<digest>`) and bump it deliberately.
+The chart references `ghcr.io/unixfg/b2-share-broker:main` by default. In
+production pin a digest via `image.digest` (`sha256:<digest>`) and bump it
+deliberately.
 
-### Reference overlay
+### Reference deployment
 
-The bees cluster's full overlay (real URLs, bucket name, node affinity,
+The bees cluster's full deployment (real URLs, bucket name, node affinity,
 digest pin, SOPS secrets, Traefik routes, Gatus endpoint) lives in
 `github.com/unixfg/gitops` under `apps/b2-share-broker`.
+
+## Local Development
+
+A `docker-compose.yaml` is included for local dev. It runs broker + processor
++ postgres behind a traefik reverse proxy that mirrors the production routing
+(`/api/uploads` and `/api/shares` to the processor, everything else to the
+broker).
+
+```bash
+cp .env.example .env
+# edit .env to fill in OIDC issuer, B2 credentials, session key
+docker compose up
+```
+
+The app is then at `http://localhost:8080`.
+
+Without a GPU, remux of H.264/AAC video still works (stream copy), but NVENC
+transcode won't. Non-video uploads work fully.
 
 ## Development
 

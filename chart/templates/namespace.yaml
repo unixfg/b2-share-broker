@@ -1,0 +1,9 @@
+{{- if .Values.namespace.create -}}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ include "b2-share-broker.namespace" . }}
+  labels:
+    {{- include "b2-share-broker.labels" . | nindent 4 }}
+    app.kubernetes.io/part-of: sharing
+{{- end -}}

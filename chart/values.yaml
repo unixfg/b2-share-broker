@@ -1,0 +1,122 @@
+# Default values for b2-share-broker.
+# These defaults are placeholders. Override them for your cluster.
+
+image:
+  repository: ghcr.io/unixfg/b2-share-broker
+  tag: main
+  # Pin a sha256 digest in production so rollouts are explicit.
+  digest: ""
+  pullPolicy: IfNotPresent
+
+namespace:
+  create: true
+
+broker:
+  replicas: 2
+  revisionHistoryLimit: 2
+  resources:
+    requests:
+      cpu: 25m
+      memory: 64Mi
+    limits:
+      cpu: 250m
+      memory: 256Mi
+  nodeSelector: {}
+  affinity: {}
+  tolerations: []
+  topologySpreadConstraints:
+    enabled: true
+    maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: DoNotSchedule
+
+processor:
+  enabled: true
+  replicas: 1
+  revisionHistoryLimit: 2
+  # Required for NVENC video transcoding. Set to "" to disable GPU.
+  runtimeClassName: nvidia
+  gpu:
+    enabled: true
+    count: 1
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+      ephemeral-storage: 2Gi
+    limits:
+      cpu: "4"
+      memory: 4Gi
+      ephemeral-storage: 8Gi
+  nodeSelector: {}
+  affinity: {}
+  tolerations: []
+  staging:
+    size: 20Gi
+    storageClassName: ""
+    accessMode: ReadWriteOnce
+
+config:
+  port: "8080"
+  oidcIssuerUrl: ""
+  oidcClientId: b2-share-web
+  oidcAudience: b2-share-web
+  oidcRequiredRoles: b2-share-user
+  publicBaseUrl: ""
+  publicShareCorsAllowedOrigins: ""
+  b2Region: us-west-004
+  maxUploadBytes: "2147483648"
+  sessionTtlSeconds: "43200"
+  ffmpegPath: /usr/bin/ffmpeg
+  transcoderWorkDir: /work
+  transcoderPollSeconds: "5"
+  stagingDir: /staging
+
+secrets:
+  # Name of an existing Secret containing all env keys the app reads.
+  # Required keys: B2_ENDPOINT, B2_BUCKET, B2_PUBLIC_BASE_URL,
+  #   AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, OIDC_CLIENT_SECRET,
+  #   SESSION_AUTH_KEY, DATABASE_URL
+  existingSecret: b2-share-broker-secrets
+
+pdb:
+  enabled: true
+  minAvailable: 1
+
+cnpg:
+  enabled: true
+  instances: 3
+  description: "PostgreSQL metadata store for b2-share-broker"
+  storage:
+    size: 10Gi
+    storageClassName: ""
+  resources:
+    requests:
+      cpu: "50m"
+      memory: 128Mi
+    limits:
+      cpu: "500m"
+      memory: 256Mi
+  backup:
+    retentionPolicy: "14d"
+    destinationPath: ""
+    endpointURL: ""
+  credentials:
+    existingSecret: b2-share-broker-db
+  backupCredentials:
+    existingSecret: b2-share-broker-b2-credentials
+  drainPdb:
+    enabled: true
+    minAvailable: 2
+  scheduledBackup:
+    enabled: true
+    schedule: "0 0 9 * * *"
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  host: ""
+  tls:
+    enabled: false
+    secretName: ""

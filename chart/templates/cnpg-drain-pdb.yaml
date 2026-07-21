@@ -1,0 +1,12 @@
+{{- if and .Values.cnpg.enabled .Values.cnpg.drainPdb.enabled -}}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ .Chart.Name }}-pg-drain
+  namespace: {{ include "b2-share-broker.namespace" . }}
+spec:
+  minAvailable: {{ .Values.cnpg.drainPdb.minAvailable }}
+  selector:
+    matchLabels:
+      cnpg.io/cluster: {{ .Chart.Name }}-pg
+{{- end -}}

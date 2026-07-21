@@ -1,0 +1,78 @@
+# docker-compose.yaml - local development stack for b2-share-broker.
+#
+# Runs broker + processor + postgres behind a traefik reverse proxy that
+# mirrors the production routing:
+#   - /api/uploads  and /api/shares  -> processor (needs staging storage)
+#   - everything else                -> broker (UI, auth, history, redirects)
+#
+# The processor runs ffmpeg for video remux/transcode. Without a GPU, remux
+# of H.264/AAC video still works; NVENC transcode won't. Non-video uploads
+# work fully.
+#
+# Bring up with:
+#   cp .env.example .env  &&  edit .env
+#   docker compose up
+#
+# The app is then at http://localhost:8080
+
+services:
+  traefik:
+    image: traefik:v3.4
+    command:
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --entrypoints.web.address=:8080
+      - --log.level=WARN
+    ports:
+      - "8080:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+
+  broker:
+    image: ghcr.io/unixfg/b2-share-broker:main
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.broker.rule=PathPrefix(`/`)
+      - traefik.http.routers.broker.priority=1
+      - traefik.http.services.broker.loadbalancer.server.port=8080
+
+  processor:
+    image: ghcr.io/unixfg/b2-share-broker:main
+    command: ["/usr/local/bin/b2-share-processor"]
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - staging:/staging
+      - work:/work
+      - tmp:/tmp
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.processor.rule=PathPrefix(`/api/uploads`) || PathPrefix(`/api/shares`)
+      - traefik.http.routers.processor.priority=100
+      - traefik.http.services.processor.loadbalancer.server.port=8080
+
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: b2_share_broker
+      POSTGRES_USER: b2_share_broker
+      POSTGRES_PASSWORD: devpassword
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U b2_share_broker"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  staging:
+  work:
+  tmp:
+  pgdata:

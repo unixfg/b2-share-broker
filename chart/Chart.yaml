@@ -1,0 +1,14 @@
+apiVersion: v2
+name: b2-share-broker
+description: Installable web share app for publishing files to a public Backblaze B2 bucket
+type: application
+version: 0.1.0
+appVersion: "main"
+keywords:
+  - sharing
+  - b2
+  - backblaze
+  - oidc
+home: https://github.com/unixfg/b2-share-broker
+maintainers:
+  - name: unixfg
