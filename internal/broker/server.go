@@ -110,7 +110,7 @@ func (s *Server) handlePublicShare(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	slug, ok := shareSlugFromPath(r.URL.EscapedPath())
+	slug, variant, ok := sharePathFromPath(r.URL.EscapedPath())
 	if !ok {
 		http.NotFound(w, r)
 		return
@@ -123,6 +123,10 @@ func (s *Server) handlePublicShare(w http.ResponseWriter, r *http.Request) {
 	}
 	if !found || alias.Visibility != "public" {
 		http.NotFound(w, r)
+		return
+	}
+	if variant != "" {
+		s.handleShareMediaVariant(w, r, alias, variant)
 		return
 	}
 	switch alias.Status {
@@ -146,6 +150,31 @@ func (s *Server) handlePublicShare(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeShareStatusPage(w, r, http.StatusAccepted, "Processing", "This share is still being prepared.")
 	}
+}
+
+// handleShareMediaVariant serves /s/{slug}/media and /s/{slug}/thumbnail. The
+// media variant counts as an open (it backs og:video/og:image embeds) and the
+// thumbnail variant does not; both redirect to the underlying B2 object.
+func (s *Server) handleShareMediaVariant(w http.ResponseWriter, r *http.Request, alias ShareAlias, variant string) {
+	if alias.ObjectKey == "" || (alias.Status != AliasStatusReady && alias.Status != "") {
+		http.NotFound(w, r)
+		return
+	}
+	objectKey := alias.ObjectKey
+	contentType := alias.ContentType
+	if variant == "thumbnail" {
+		if alias.ThumbnailKey == "" {
+			http.NotFound(w, r)
+			return
+		}
+		objectKey = alias.ThumbnailKey
+		contentType = "image/jpeg"
+	} else {
+		if err := s.metadata.RecordAliasRedirect(r.Context(), alias.Slug); err != nil {
+			s.logger.Warn("failed to record share media fetch", "slug", alias.Slug, "error", err)
+		}
+	}
+	writeShareRedirect(w, PublicURL(s.cfg.B2PublicBaseURL, objectKey), contentType)
 }
 
 func (s *Server) handlePublicSharePreflight(w http.ResponseWriter, r *http.Request) {
@@ -635,6 +664,28 @@ func shareSlugFromPath(escapedPath string) (string, bool) {
 	return slugFromEscapedPath(escapedPath, "/s/")
 }
 
+func sharePathFromPath(escapedPath string) (string, string, bool) {
+	if !strings.HasPrefix(escapedPath, "/s/") {
+		return "", "", false
+	}
+	rest := strings.TrimPrefix(escapedPath, "/s/")
+	variant := ""
+	if index := strings.LastIndex(rest, "/"); index >= 0 {
+		if suffix := rest[index+1:]; suffix == "media" || suffix == "thumbnail" {
+			variant = suffix
+			rest = rest[:index]
+		}
+	}
+	if rest == "" || strings.Contains(rest, "/") {
+		return "", "", false
+	}
+	slug, err := url.PathUnescape(rest)
+	if err != nil || slug == "" || strings.Contains(slug, "/") {
+		return "", "", false
+	}
+	return slug, variant, true
+}
+
 func slugFromEscapedPath(escapedPath, prefix string) (string, bool) {
 	if !strings.HasPrefix(escapedPath, prefix) {
 		return "", false
@@ -716,7 +767,7 @@ func isUnfurlAgent(userAgent string) bool {
 
 func (s *Server) writeShareUnfurlPage(w http.ResponseWriter, r *http.Request, alias ShareAlias) {
 	shareURL := ShareURL(s.cfg.PublicBaseURL, alias.Slug)
-	mediaURL := PublicURL(s.cfg.B2PublicBaseURL, alias.ObjectKey)
+	mediaURL := shareURL + "/media"
 
 	var tags strings.Builder
 	writeProperty := func(property, content string) {
@@ -755,7 +806,7 @@ func (s *Server) writeShareUnfurlPage(w http.ResponseWriter, r *http.Request, al
 			writeProperty("og:video:height", strconv.Itoa(alias.Height))
 		}
 		if alias.ThumbnailKey != "" {
-			imageURL = PublicURL(s.cfg.B2PublicBaseURL, alias.ThumbnailKey)
+			imageURL = shareURL + "/thumbnail"
 		}
 	case strings.HasPrefix(alias.ContentType, "image/"):
 		writeProperty("og:type", "website")
