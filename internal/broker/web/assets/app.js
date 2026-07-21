@@ -6,12 +6,17 @@ const PENDING_KEY = "current";
 const state = {
   session: { authenticated: false },
   file: null,
+  nameBase: "",
+  nameExtension: "",
   processingJob: null,
   processingPoll: 0,
   historySearch: "",
   historySearchPoll: 0,
   publicUrl: "",
-  shares: []
+  shares: [],
+  renamingSlug: "",
+  renameBase: "",
+  renameExtension: ""
 };
 
 const els = {};
@@ -39,6 +44,9 @@ function bindElements() {
     "logoutLink",
     "uploadForm",
     "fileInput",
+    "nameInput",
+    "nameExtension",
+    "nameHint",
     "dropzone",
     "fileTitle",
     "fileMeta",
@@ -67,6 +75,9 @@ function bindEvents() {
       setFile(null);
       setStatus("Share one file at a time.", true);
     }
+  });
+  els.nameInput.addEventListener("input", () => {
+    state.nameBase = els.nameInput.value;
   });
   els.uploadForm.addEventListener("submit", (event) => {
     event.preventDefault();
@@ -172,6 +183,14 @@ async function loadPendingShare() {
 function setFile(file) {
   clearProcessingPoll();
   state.file = file;
+  if (file) {
+    const suggested = suggestedShareName(file);
+    state.nameBase = suggested.base;
+    state.nameExtension = suggested.extension;
+  } else {
+    state.nameBase = "";
+    state.nameExtension = "";
+  }
   state.processingJob = null;
   state.publicUrl = "";
   render();
@@ -183,6 +202,12 @@ function render() {
   els.logoutLink.classList.toggle("hidden", !state.session.authenticated);
   els.uploadButton.disabled = !state.file;
   els.clearButton.disabled = !state.file && !state.publicUrl;
+  els.nameInput.disabled = !state.file;
+  els.nameInput.value = state.nameBase;
+  els.nameExtension.textContent = state.nameExtension;
+  els.nameHint.textContent = state.file
+    ? `The ${state.nameExtension} extension is fixed.`
+    : "Choose a file to generate a public name.";
   els.resultPanel.classList.toggle("hidden", !state.publicUrl);
   els.historyPanel.classList.toggle("hidden", !state.session.authenticated);
   els.resultUrl.textContent = state.publicUrl;
@@ -229,6 +254,7 @@ async function uploadSelectedFile() {
     els.uploadButton.disabled = true;
     const form = new FormData();
     form.append("file", file, file.name || "upload");
+    form.append("name", shareName(state.nameBase, state.nameExtension));
     const createResponse = await apiFetch("/api/uploads", {
       method: "POST",
       body: form
@@ -285,9 +311,17 @@ function renderShares() {
     const item = document.createElement("article");
     item.className = "history-item";
 
-    const title = document.createElement("div");
-    title.className = "history-title";
-    title.textContent = share.displayFilename || share.slug || "share";
+    if (state.renamingSlug === share.slug) {
+      item.append(renderRenameForm(share));
+    } else {
+      const title = document.createElement("button");
+      title.className = "history-title history-name-button";
+      title.type = "button";
+      title.textContent = share.slug || share.displayFilename || "share";
+      title.title = "Rename share";
+      title.addEventListener("click", () => beginRename(share));
+      item.append(title);
+    }
 
     const meta = document.createElement("div");
     meta.className = "history-meta";
@@ -313,7 +347,7 @@ function renderShares() {
     actions.className = "history-actions";
     actions.append(links, deleteButton);
 
-    item.append(title, meta);
+    item.append(meta);
     if (share.error) {
       const error = document.createElement("div");
       error.className = "history-error";
@@ -322,6 +356,92 @@ function renderShares() {
     }
     item.append(actions);
     els.historyList.append(item);
+  }
+}
+
+function beginRename(share) {
+  state.renamingSlug = share.slug;
+  state.renameExtension = shareNameExtension(share.slug);
+  state.renameBase = shareNameBase(share.slug || share.displayFilename, state.renameExtension);
+  render();
+  window.requestAnimationFrame(() => {
+    const input = document.getElementById("renameInput");
+    if (input) {
+      input.focus();
+      input.select();
+    }
+  });
+}
+
+function renderRenameForm(share) {
+  const form = document.createElement("form");
+  form.className = "history-rename";
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    await renameShare(share);
+  });
+
+  const control = document.createElement("span");
+  control.className = "name-control";
+  const input = document.createElement("input");
+  input.id = "renameInput";
+  input.type = "text";
+  input.autocomplete = "off";
+  input.spellcheck = false;
+  input.value = state.renameBase;
+  input.setAttribute("aria-label", "Share name");
+  input.addEventListener("input", () => {
+    state.renameBase = input.value;
+  });
+  const extension = document.createElement("output");
+  extension.className = "name-extension";
+  extension.textContent = state.renameExtension;
+  control.append(input, extension);
+
+  const saveButton = document.createElement("button");
+  saveButton.className = "button primary compact";
+  saveButton.type = "submit";
+  saveButton.textContent = "Save";
+
+  const cancelButton = document.createElement("button");
+  cancelButton.className = "button secondary compact";
+  cancelButton.type = "button";
+  cancelButton.textContent = "Cancel";
+  cancelButton.addEventListener("click", () => {
+    state.renamingSlug = "";
+    state.renameBase = "";
+    state.renameExtension = "";
+    render();
+  });
+
+  form.append(control, saveButton, cancelButton);
+  return form;
+}
+
+async function renameShare(share) {
+  if (!share || !share.slug) {
+    return;
+  }
+  try {
+    const renamed = await apiFetch(`/api/shares/${encodeURIComponent(share.slug)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ name: shareName(state.renameBase, state.renameExtension) })
+    });
+    if (state.publicUrl === share.publicUrl) {
+      state.publicUrl = renamed.publicUrl;
+    }
+    if (state.processingJob && state.processingJob.slug === share.slug) {
+      state.processingJob.slug = renamed.slug;
+      state.processingJob.shareUrl = renamed.publicUrl;
+    }
+    state.renamingSlug = "";
+    state.renameBase = "";
+    state.renameExtension = "";
+    await loadShares();
+    setStatus("Renamed");
+    render();
+  } catch (error) {
+    setStatus(error.message || "Rename failed.", true);
   }
 }
 
@@ -355,6 +475,84 @@ function historyLink(label, href) {
   return link;
 }
 
+function suggestedShareName(file) {
+  const extension = finalExtensionForFile(file);
+  const filename = String(file.name || "upload").replaceAll("\\", "/").split("/").pop();
+  const base = filename.replace(/\.[^.]*$/, "");
+  let normalized = "";
+  let lastWasSeparator = false;
+  for (const character of base) {
+    if (character === "." || character === "-") {
+      normalized += character;
+      lastWasSeparator = false;
+    } else if (character === "_" || /\s/.test(character)) {
+      if (!lastWasSeparator) {
+        normalized += "_";
+        lastWasSeparator = true;
+      }
+    } else if (/^[A-Za-z0-9]$/.test(character)) {
+      normalized += character;
+      lastWasSeparator = false;
+    }
+  }
+  normalized = normalized
+    .replace(/^[._-]+|[._-]+$/g, "")
+    .replace(/[-_]{2,}/g, "_")
+    .toLowerCase();
+  if (!normalized) {
+    normalized = "share";
+  }
+  normalized = normalized.slice(0, 120).replace(/[._-]+$/g, "") || "share";
+  return { base: `${normalized}-${randomHex(8)}`, extension };
+}
+
+function finalExtensionForFile(file) {
+  const filename = String(file.name || "").toLowerCase();
+  const contentType = String(file.type || "").toLowerCase().split(";", 1)[0];
+  const videoExtensions = [".mp4", ".m4v", ".mov", ".mkv", ".webm", ".avi"];
+  if (contentType.startsWith("video/") || videoExtensions.some((extension) => filename.endsWith(extension))) {
+    return ".mp4";
+  }
+  const match = filename.match(/\.([a-z0-9]{1,16})$/);
+  if (match) {
+    return `.${match[1]}`;
+  }
+  const extensions = {
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
+    "image/heic": ".heic",
+    "image/heif": ".heif",
+    "application/pdf": ".pdf",
+    "text/plain": ".txt"
+  };
+  return extensions[contentType] || ".bin";
+}
+
+function randomHex(byteLength) {
+  const bytes = new Uint8Array(byteLength);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("");
+}
+
+function shareName(base, extension) {
+  return `${String(base || "").trim() || "share"}${extension || ""}`;
+}
+
+function shareNameExtension(slug) {
+  const match = String(slug || "").match(/\.[A-Za-z0-9]{1,16}$/);
+  return match ? match[0].toLowerCase() : "";
+}
+
+function shareNameBase(name, extension) {
+  const value = String(name || "").trim();
+  if (extension && value.toLowerCase().endsWith(extension)) {
+    return value.slice(0, -extension.length) || "share";
+  }
+  return value.replace(/\.[^.]*$/, "") || "share";
+}
+
 async function copyResult() {
   if (!state.publicUrl) {
     return;
@@ -373,6 +571,11 @@ async function deleteShare(share) {
   try {
     await apiFetch(`/api/shares/${encodeURIComponent(share.slug)}`, { method: "DELETE" });
     state.shares = state.shares.filter((item) => item.slug !== share.slug);
+    if (state.renamingSlug === share.slug) {
+      state.renamingSlug = "";
+      state.renameBase = "";
+      state.renameExtension = "";
+    }
     if (state.publicUrl === share.publicUrl) {
       state.publicUrl = "";
     }

@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -48,6 +49,10 @@ type uploadStatusResponse struct {
 
 type listSharesResponse struct {
 	Shares []ShareAlias `json:"shares"`
+}
+
+type renameShareRequest struct {
+	Name string `json:"name"`
 }
 
 func NewServer(cfg Config, auth Authenticator, store ObjectStore, metadata MetadataStore, logger *slog.Logger) *Server {
@@ -123,6 +128,17 @@ func (s *Server) handlePublicShare(w http.ResponseWriter, r *http.Request) {
 	}
 	if !found || alias.Visibility != "public" {
 		http.NotFound(w, r)
+		return
+	}
+	if alias.RedirectToSlug != "" {
+		location := ShareURL(s.cfg.PublicBaseURL, alias.RedirectToSlug)
+		if variant != "" {
+			location += "/" + variant
+		}
+		if r.URL.RawQuery != "" {
+			location += "?" + r.URL.RawQuery
+		}
+		http.Redirect(w, r, location, http.StatusPermanentRedirect)
 		return
 	}
 	if variant != "" {
@@ -295,11 +311,16 @@ func (s *Server) handleCreateUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	slug, err := GenerateRandomAliasSlug(upload.filename, upload.finalExtension)
-	if err != nil {
-		_ = os.Remove(upload.stagingPath)
-		writeJSONError(w, http.StatusInternalServerError, "failed to create share slug")
-		return
+	slug := ""
+	if strings.TrimSpace(upload.name) != "" {
+		slug = NormalizeAliasSlug(upload.name, upload.finalExtension)
+	} else {
+		slug, err = GenerateRandomAliasSlug(upload.filename, upload.finalExtension)
+		if err != nil {
+			_ = os.Remove(upload.stagingPath)
+			writeJSONError(w, http.StatusInternalServerError, "failed to create share slug")
+			return
+		}
 	}
 
 	job := ProcessingJob{
@@ -317,14 +338,14 @@ func (s *Server) handleCreateUpload(w http.ResponseWriter, r *http.Request) {
 	created, err := s.metadata.CreateIngestJob(r.Context(), job, ShareAlias{
 		Slug:            slug,
 		Owner:           authenticated.Principal.Subject,
-		DisplayFilename: upload.filename,
+		DisplayFilename: slug,
 		Visibility:      "public",
 		Status:          AliasStatusPending,
 	})
 	if err != nil {
 		_ = os.Remove(upload.stagingPath)
-		if errors.Is(err, ErrAliasConflict) {
-			writeJSONError(w, http.StatusConflict, "share alias is already in use")
+		if errors.Is(err, ErrAliasConflict) || errors.Is(err, ErrAliasExists) {
+			writeJSONError(w, http.StatusConflict, "share name is already in use")
 			return
 		}
 		s.logger.Error("failed to create ingest job", "slug", slug, "error", err)
@@ -391,10 +412,7 @@ func (s *Server) handleListShares(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for index := range aliases {
-		aliases[index].PublicURL = ShareURL(s.cfg.PublicBaseURL, aliases[index].Slug)
-		if aliases[index].ObjectKey != "" {
-			aliases[index].B2URL = PublicURL(s.cfg.B2PublicBaseURL, aliases[index].ObjectKey)
-		}
+		s.populateShareURLs(&aliases[index])
 	}
 	writeJSON(w, http.StatusOK, listSharesResponse{Shares: aliases})
 }
@@ -415,8 +433,8 @@ func parseShareLimit(value string) int {
 }
 
 func (s *Server) handleShare(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodDelete {
-		w.Header().Set("Allow", "DELETE")
+	if r.Method != http.MethodDelete && r.Method != http.MethodPatch {
+		w.Header().Set("Allow", "DELETE, PATCH")
 		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
@@ -432,6 +450,34 @@ func (s *Server) handleShare(w http.ResponseWriter, r *http.Request) {
 	slug, ok := slugFromEscapedPath(r.URL.EscapedPath(), "/api/shares/")
 	if !ok {
 		http.NotFound(w, r)
+		return
+	}
+	if r.Method == http.MethodPatch {
+		var payload renameShareRequest
+		if err := decodeJSONBody(w, r, &payload); err != nil {
+			return
+		}
+		if strings.TrimSpace(payload.Name) == "" {
+			writeJSONError(w, http.StatusBadRequest, "name is required")
+			return
+		}
+		newSlug := NormalizeAliasSlug(payload.Name, path.Ext(slug))
+		renamed, found, err := s.metadata.RenameAlias(r.Context(), slug, authenticated.Principal.Subject, newSlug)
+		if err != nil {
+			if errors.Is(err, ErrAliasConflict) || errors.Is(err, ErrAliasExists) {
+				writeJSONError(w, http.StatusConflict, "share name is already in use")
+				return
+			}
+			s.logger.Error("failed to rename share alias", "slug", slug, "newSlug", newSlug, "error", err)
+			writeJSONError(w, http.StatusInternalServerError, "failed to rename share")
+			return
+		}
+		if !found {
+			http.NotFound(w, r)
+			return
+		}
+		s.populateShareURLs(&renamed)
+		writeJSON(w, http.StatusOK, renamed)
 		return
 	}
 	deleted, found, err := s.metadata.DeleteAlias(r.Context(), slug, authenticated.Principal.Subject)
@@ -460,6 +506,13 @@ func (s *Server) handleShare(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (s *Server) populateShareURLs(alias *ShareAlias) {
+	alias.PublicURL = ShareURL(s.cfg.PublicBaseURL, alias.Slug)
+	if alias.ObjectKey != "" {
+		alias.B2URL = PublicURL(s.cfg.B2PublicBaseURL, alias.ObjectKey)
+	}
+}
+
 func (s *Server) handleShareTargetFallback(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet || r.Method == http.MethodHead {
 		http.Redirect(w, r, "/share", http.StatusFound)
@@ -476,11 +529,13 @@ func (s *Server) handleShareTargetFallback(w http.ResponseWriter, r *http.Reques
 var errUploadTooLarge = errors.New("upload too large")
 var errUploadMissingFile = errors.New("upload file required")
 var errUploadMultipleFiles = errors.New("multiple upload files")
-var errUploadCustomAlias = errors.New("custom upload alias")
+var errUploadMultipleNames = errors.New("multiple upload names")
+var errUploadNameTooLong = errors.New("upload name too long")
 var errMultipartRead = errors.New("multipart read failed")
 
 type stagedMultipartUpload struct {
 	filename       string
+	name           string
 	contentType    string
 	finalExtension string
 	profile        string
@@ -492,6 +547,7 @@ type stagedMultipartUpload struct {
 func (s *Server) stageMultipartUpload(r *http.Request, reader *multipart.Reader, jobID string) (stagedMultipartUpload, error) {
 	var upload stagedMultipartUpload
 	fileSeen := false
+	nameSeen := false
 
 	cleanup := func() {
 		if upload.stagingPath != "" {
@@ -542,6 +598,7 @@ func (s *Server) stageMultipartUpload(r *http.Request, reader *multipart.Reader,
 			}
 			upload = stagedMultipartUpload{
 				filename:       filename,
+				name:           upload.name,
 				contentType:    contentType,
 				finalExtension: finalExtension,
 				profile:        profile,
@@ -549,17 +606,24 @@ func (s *Server) stageMultipartUpload(r *http.Request, reader *multipart.Reader,
 				size:           size,
 				sha256:         sourceSHA256,
 			}
-		case "alias":
+		case "name":
+			if nameSeen {
+				_ = part.Close()
+				cleanup()
+				return stagedMultipartUpload{}, errUploadMultipleNames
+			}
+			nameSeen = true
 			value, err := io.ReadAll(io.LimitReader(part, 4097))
 			_ = part.Close()
 			if err != nil {
 				cleanup()
 				return stagedMultipartUpload{}, fmt.Errorf("%w: %w", errMultipartRead, err)
 			}
-			if len(value) > 4096 || strings.TrimSpace(string(value)) != "" {
+			if len(value) > 4096 {
 				cleanup()
-				return stagedMultipartUpload{}, errUploadCustomAlias
+				return stagedMultipartUpload{}, errUploadNameTooLong
 			}
+			upload.name = string(value)
 		default:
 			if _, err := io.Copy(io.Discard, part); err != nil {
 				_ = part.Close()
@@ -588,8 +652,10 @@ func (s *Server) writeUploadStagingError(w http.ResponseWriter, r *http.Request,
 		writeJSONError(w, http.StatusBadRequest, "file is required")
 	case errors.Is(err, errUploadMultipleFiles):
 		writeJSONError(w, http.StatusBadRequest, "share one file at a time")
-	case errors.Is(err, errUploadCustomAlias):
-		writeJSONError(w, http.StatusBadRequest, "custom aliases are not supported")
+	case errors.Is(err, errUploadMultipleNames):
+		writeJSONError(w, http.StatusBadRequest, "provide one share name")
+	case errors.Is(err, errUploadNameTooLong):
+		writeJSONError(w, http.StatusBadRequest, "share name is too long")
 	case errors.Is(err, errUploadTooLarge):
 		writeJSONError(w, http.StatusRequestEntityTooLarge, "file is larger than the configured maximum")
 	case errors.Is(err, errMultipartRead):

@@ -29,6 +29,7 @@ type StoredObject struct {
 
 type ShareAlias struct {
 	Slug             string    `json:"slug"`
+	RedirectToSlug   string    `json:"-"`
 	ObjectSHA256     string    `json:"sha256,omitempty"`
 	ObjectKey        string    `json:"objectKey,omitempty"`
 	Owner            string    `json:"owner"`
@@ -93,6 +94,7 @@ type MetadataStore interface {
 	GetAlias(ctx context.Context, slug string) (ShareAlias, bool, error)
 	RecordAliasRedirect(ctx context.Context, slug string) error
 	ListAliases(ctx context.Context, owner, query string, limit int) ([]ShareAlias, error)
+	RenameAlias(ctx context.Context, slug, owner, newSlug string) (ShareAlias, bool, error)
 	DeleteAlias(ctx context.Context, slug, owner string) (DeletedShare, bool, error)
 	CreateIngestJob(ctx context.Context, job ProcessingJob, alias ShareAlias) (ProcessingJob, error)
 	GetProcessingJob(ctx context.Context, id, owner string) (ProcessingJob, bool, error)
@@ -102,6 +104,7 @@ type MetadataStore interface {
 }
 
 var ErrAliasConflict = errors.New("share alias is already owned by another user")
+var ErrAliasExists = errors.New("share alias is already in use")
 
 type PostgresMetadataStore struct {
 	db *sql.DB
@@ -163,6 +166,7 @@ func (s *PostgresMetadataStore) runMigrations(ctx context.Context) error {
 		`ALTER TABLE objects ADD COLUMN IF NOT EXISTS thumbnail_key text NOT NULL DEFAULT ''`,
 		`CREATE TABLE IF NOT EXISTS aliases (
 			slug text PRIMARY KEY,
+			redirect_to_slug text NOT NULL DEFAULT '',
 			object_sha256 text REFERENCES objects(sha256),
 			owner_subject text NOT NULL,
 			display_filename text NOT NULL,
@@ -175,9 +179,11 @@ func (s *PostgresMetadataStore) runMigrations(ctx context.Context) error {
 			last_redirected_at timestamptz
 		)`,
 		`ALTER TABLE aliases ALTER COLUMN object_sha256 DROP NOT NULL`,
+		`ALTER TABLE aliases ADD COLUMN IF NOT EXISTS redirect_to_slug text NOT NULL DEFAULT ''`,
 		`ALTER TABLE aliases ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'ready'`,
 		`ALTER TABLE aliases ADD COLUMN IF NOT EXISTS error text NOT NULL DEFAULT ''`,
 		`CREATE INDEX IF NOT EXISTS aliases_owner_updated_idx ON aliases(owner_subject, updated_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS aliases_redirect_to_slug_idx ON aliases(redirect_to_slug)`,
 		`CREATE TABLE IF NOT EXISTS alias_history (
 			id bigserial PRIMARY KEY,
 			slug text NOT NULL,
@@ -351,6 +357,7 @@ func (s *PostgresMetadataStore) ListAliases(ctx context.Context, owner, query st
 	rows, err := s.db.QueryContext(ctx, aliasSelect()+`
 		WHERE a.owner_subject = $1
 			AND a.visibility <> 'deleted'
+			AND a.redirect_to_slug = ''
 			AND (
 				$2 = ''
 				OR lower(a.slug) LIKE $3
@@ -376,6 +383,64 @@ func (s *PostgresMetadataStore) ListAliases(ctx context.Context, owner, query st
 	return aliases, rows.Err()
 }
 
+func (s *PostgresMetadataStore) RenameAlias(ctx context.Context, slug, owner, newSlug string) (ShareAlias, bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return ShareAlias{}, false, err
+	}
+	defer tx.Rollback()
+
+	alias, found, err := currentOwnedAliasForUpdateTx(ctx, tx, slug, owner)
+	if err != nil || !found {
+		return ShareAlias{}, found, err
+	}
+	if alias.Slug == newSlug {
+		return alias, true, tx.Commit()
+	}
+
+	result, err := tx.ExecContext(ctx, `INSERT INTO aliases
+		(slug, redirect_to_slug, object_sha256, owner_subject, display_filename, visibility, status, error, created_at, redirect_count, last_redirected_at)
+		VALUES ($1, '', $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		ON CONFLICT (slug) DO NOTHING`,
+		newSlug,
+		nullString(alias.ObjectSHA256),
+		owner,
+		newSlug,
+		alias.Visibility,
+		alias.Status,
+		alias.Error,
+		alias.CreatedAt,
+		alias.RedirectCount,
+		nullTime(alias.LastRedirectedAt),
+	)
+	if err != nil {
+		return ShareAlias{}, false, err
+	}
+	if count, err := result.RowsAffected(); err != nil || count == 0 {
+		if err != nil {
+			return ShareAlias{}, false, err
+		}
+		return ShareAlias{}, false, ErrAliasExists
+	}
+
+	if _, err := tx.ExecContext(ctx, `UPDATE aliases
+		SET redirect_to_slug = $2, updated_at = now()
+		WHERE owner_subject = $3
+			AND visibility <> 'deleted'
+			AND (slug = $1 OR redirect_to_slug = $1)`, alias.Slug, newSlug, owner); err != nil {
+		return ShareAlias{}, false, err
+	}
+
+	renamed, found, err := ownedVisibleAliasForUpdateTx(ctx, tx, newSlug, owner)
+	if err != nil || !found {
+		return ShareAlias{}, found, err
+	}
+	if err := tx.Commit(); err != nil {
+		return ShareAlias{}, false, err
+	}
+	return renamed, true, nil
+}
+
 func (s *PostgresMetadataStore) DeleteAlias(ctx context.Context, slug, owner string) (DeletedShare, bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -383,29 +448,28 @@ func (s *PostgresMetadataStore) DeleteAlias(ctx context.Context, slug, owner str
 	}
 	defer tx.Rollback()
 
-	var alias ShareAlias
-	err = scanAlias(tx.QueryRowContext(ctx, aliasSelect()+`
-		WHERE a.slug = $1
-			AND a.owner_subject = $2
-			AND a.visibility <> 'deleted'
-		FOR UPDATE OF a`, slug, owner), &alias)
-	if errors.Is(err, sql.ErrNoRows) {
-		return DeletedShare{}, false, nil
-	}
-	if err != nil {
-		return DeletedShare{}, false, err
+	alias, found, err := currentOwnedAliasForUpdateTx(ctx, tx, slug, owner)
+	if err != nil || !found {
+		return DeletedShare{}, found, err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE aliases
 		SET visibility = 'deleted', updated_at = now()
-		WHERE slug = $1 AND owner_subject = $2`, slug, owner); err != nil {
+		WHERE owner_subject = $2
+			AND visibility <> 'deleted'
+			AND (slug = $1 OR redirect_to_slug = $1)`, alias.Slug, owner); err != nil {
 		return DeletedShare{}, false, err
 	}
 	rows, err := tx.QueryContext(ctx, `UPDATE processing_jobs
 		SET status = 'canceled', updated_at = now(), completed_at = now(), error = 'share deleted'
-		WHERE alias_slug = $1
-			AND owner_subject = $2
+		WHERE owner_subject = $2
 			AND status IN ('queued', 'running')
-		RETURNING staging_path`, slug, owner)
+			AND (
+				alias_slug = $1
+				OR alias_slug IN (
+					SELECT slug FROM aliases WHERE owner_subject = $2 AND redirect_to_slug = $1
+				)
+			)
+		RETURNING staging_path`, alias.Slug, owner)
 	if err != nil {
 		return DeletedShare{}, false, err
 	}
@@ -430,7 +494,8 @@ func (s *PostgresMetadataStore) DeleteAlias(ctx context.Context, slug, owner str
 		if err := tx.QueryRowContext(ctx, `SELECT count(*)
 			FROM aliases
 			WHERE object_sha256 = $1
-				AND visibility <> 'deleted'`, alias.ObjectSHA256).Scan(&references); err != nil {
+				AND visibility <> 'deleted'
+				AND redirect_to_slug = ''`, alias.ObjectSHA256).Scan(&references); err != nil {
 			return DeletedShare{}, false, err
 		}
 		if references == 0 {
@@ -441,7 +506,74 @@ func (s *PostgresMetadataStore) DeleteAlias(ctx context.Context, slug, owner str
 			deleted.ThumbnailKey = alias.ThumbnailKey
 		}
 	}
-	return deleted, true, tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return DeletedShare{}, false, err
+	}
+	return deleted, true, nil
+}
+
+func currentOwnedAliasForUpdateTx(ctx context.Context, tx *sql.Tx, slug, owner string) (ShareAlias, bool, error) {
+	alias, found, err := ownedVisibleAliasForUpdateTx(ctx, tx, slug, owner)
+	if err != nil || !found {
+		return alias, found, err
+	}
+	if alias.RedirectToSlug != "" {
+		return ShareAlias{}, false, nil
+	}
+	return alias, true, nil
+}
+
+func ownedVisibleAliasForUpdateTx(ctx context.Context, tx *sql.Tx, slug, owner string) (ShareAlias, bool, error) {
+	var alias ShareAlias
+	err := scanAlias(tx.QueryRowContext(ctx, aliasSelect()+`
+		WHERE a.slug = $1
+			AND a.owner_subject = $2
+			AND a.visibility <> 'deleted'
+		FOR UPDATE OF a`, slug, owner), &alias)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ShareAlias{}, false, nil
+	}
+	if err != nil {
+		return ShareAlias{}, false, err
+	}
+	return alias, true, nil
+}
+
+// Processing jobs retain their initial alias, so follow redirects under lock to
+// complete or fail against the name that is current at commit time.
+func currentProcessingAliasForUpdateTx(ctx context.Context, tx *sql.Tx, slug string) (ShareAlias, bool, error) {
+	for redirects := 0; redirects < 100; redirects++ {
+		var alias ShareAlias
+		err := scanAlias(tx.QueryRowContext(ctx, aliasSelect()+`
+			WHERE a.slug = $1
+				AND a.visibility <> 'deleted'`, slug), &alias)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ShareAlias{}, false, nil
+		}
+		if err != nil {
+			return ShareAlias{}, false, err
+		}
+		if alias.RedirectToSlug != "" {
+			slug = alias.RedirectToSlug
+			continue
+		}
+
+		err = scanAlias(tx.QueryRowContext(ctx, aliasSelect()+`
+			WHERE a.slug = $1
+				AND a.visibility <> 'deleted'
+			FOR UPDATE OF a`, slug), &alias)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ShareAlias{}, false, nil
+		}
+		if err != nil {
+			return ShareAlias{}, false, err
+		}
+		if alias.RedirectToSlug == "" {
+			return alias, true, nil
+		}
+		slug = alias.RedirectToSlug
+	}
+	return ShareAlias{}, false, fmt.Errorf("alias redirect chain for processing job exceeds 100 entries")
 }
 
 func (s *PostgresMetadataStore) CreateIngestJob(ctx context.Context, job ProcessingJob, alias ShareAlias) (ProcessingJob, error) {
@@ -452,7 +584,7 @@ func (s *PostgresMetadataStore) CreateIngestJob(ctx context.Context, job Process
 	defer tx.Rollback()
 	alias.Status = AliasStatusPending
 	alias.Visibility = "public"
-	if err := upsertAliasTx(ctx, tx, alias); err != nil {
+	if err := createAliasTx(ctx, tx, alias); err != nil {
 		return ProcessingJob{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO processing_jobs
@@ -536,12 +668,13 @@ func (s *PostgresMetadataStore) CompleteProcessingJob(ctx context.Context, id st
 	defer tx.Rollback()
 
 	var profile string
+	var aliasSlug string
 	var sourceSHA sql.NullString
-	err = tx.QueryRowContext(ctx, `SELECT source_object_sha256, profile
+	err = tx.QueryRowContext(ctx, `SELECT source_object_sha256, profile, alias_slug
 		FROM processing_jobs
 		WHERE id = $1
 			AND status = 'running'
-		FOR UPDATE`, id).Scan(&sourceSHA, &profile)
+		FOR UPDATE`, id).Scan(&sourceSHA, &profile, &aliasSlug)
 	if errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("running processing job %q not found", id)
 	}
@@ -551,6 +684,18 @@ func (s *PostgresMetadataStore) CompleteProcessingJob(ctx context.Context, id st
 	if err := upsertObjectTx(ctx, tx, object); err != nil {
 		return err
 	}
+	currentAlias, found, err := currentProcessingAliasForUpdateTx(ctx, tx, aliasSlug)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return fmt.Errorf("share alias %q for processing job %q not found", aliasSlug, id)
+	}
+	alias.Slug = currentAlias.Slug
+	alias.Owner = currentAlias.Owner
+	alias.DisplayFilename = currentAlias.DisplayFilename
+	alias.Visibility = currentAlias.Visibility
+	alias.RedirectToSlug = currentAlias.RedirectToSlug
 	alias.ObjectSHA256 = object.SHA256
 	alias.Status = AliasStatusReady
 	alias.Error = ""
@@ -600,11 +745,17 @@ func (s *PostgresMetadataStore) FailProcessingJob(ctx context.Context, id, messa
 			AND status IN ('queued', 'running')`, id, message); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE aliases
-		SET status = 'failed', error = $2, updated_at = now()
-		WHERE slug = $1
-			AND visibility <> 'deleted'`, slug, message); err != nil {
+	alias, found, err := currentProcessingAliasForUpdateTx(ctx, tx, slug)
+	if err != nil {
 		return err
+	}
+	if found {
+		if _, err := tx.ExecContext(ctx, `UPDATE aliases
+			SET status = 'failed', error = $2, updated_at = now()
+			WHERE slug = $1
+				AND visibility <> 'deleted'`, alias.Slug, message); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
 }
@@ -641,6 +792,41 @@ func upsertObjectTx(ctx context.Context, tx *sql.Tx, object StoredObject) error 
 	return err
 }
 
+func createAliasTx(ctx context.Context, tx *sql.Tx, alias ShareAlias) error {
+	if alias.Visibility == "" {
+		alias.Visibility = "public"
+	}
+	if alias.Status == "" {
+		if alias.ObjectSHA256 == "" {
+			alias.Status = AliasStatusPending
+		} else {
+			alias.Status = AliasStatusReady
+		}
+	}
+	result, err := tx.ExecContext(ctx, `INSERT INTO aliases
+		(slug, redirect_to_slug, object_sha256, owner_subject, display_filename, visibility, status, error)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		ON CONFLICT (slug) DO NOTHING`,
+		alias.Slug,
+		alias.RedirectToSlug,
+		nullString(alias.ObjectSHA256),
+		alias.Owner,
+		alias.DisplayFilename,
+		alias.Visibility,
+		alias.Status,
+		alias.Error,
+	)
+	if err != nil {
+		return err
+	}
+	if count, err := result.RowsAffected(); err != nil {
+		return err
+	} else if count == 0 {
+		return ErrAliasExists
+	}
+	return nil
+}
+
 func upsertAliasTx(ctx context.Context, tx *sql.Tx, alias ShareAlias) error {
 	var previousObject sql.NullString
 	var previousOwner string
@@ -671,9 +857,10 @@ func upsertAliasTx(ctx context.Context, tx *sql.Tx, alias ShareAlias) error {
 			alias.Status = AliasStatusReady
 		}
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO aliases (slug, object_sha256, owner_subject, display_filename, visibility, status, error)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
+	_, err = tx.ExecContext(ctx, `INSERT INTO aliases (slug, redirect_to_slug, object_sha256, owner_subject, display_filename, visibility, status, error)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		ON CONFLICT (slug) DO UPDATE SET
+			redirect_to_slug = EXCLUDED.redirect_to_slug,
 			object_sha256 = EXCLUDED.object_sha256,
 			owner_subject = EXCLUDED.owner_subject,
 			display_filename = EXCLUDED.display_filename,
@@ -682,6 +869,7 @@ func upsertAliasTx(ctx context.Context, tx *sql.Tx, alias ShareAlias) error {
 			error = EXCLUDED.error,
 			updated_at = now()`,
 		alias.Slug,
+		alias.RedirectToSlug,
 		nullString(alias.ObjectSHA256),
 		alias.Owner,
 		alias.DisplayFilename,
@@ -694,15 +882,16 @@ func upsertAliasTx(ctx context.Context, tx *sql.Tx, alias ShareAlias) error {
 
 func getProcessingJobTx(ctx context.Context, tx *sql.Tx, id, owner string) (ProcessingJob, bool, error) {
 	query := `SELECT
-			j.id, j.owner_subject, j.alias_slug, COALESCE(j.source_object_sha256, ''), COALESCE(o.object_key, ''),
+			j.id, j.owner_subject, COALESCE(current_alias.slug, a.slug), COALESCE(j.source_object_sha256, ''), COALESCE(o.object_key, ''),
 			j.staging_path, COALESCE(j.target_object_sha256, ''), COALESCE(t.object_key, ''),
 			j.profile, j.status, j.error,
 			j.created_at, j.updated_at, j.started_at, j.completed_at,
-			COALESCE(NULLIF(j.source_filename, ''), a.display_filename),
+			COALESCE(NULLIF(j.source_filename, ''), current_alias.display_filename, a.display_filename),
 			j.source_size_bytes,
 			j.source_content_type
 		FROM processing_jobs j
 		JOIN aliases a ON a.slug = j.alias_slug
+		LEFT JOIN aliases current_alias ON current_alias.slug = NULLIF(a.redirect_to_slug, '')
 		LEFT JOIN objects o ON o.sha256 = j.source_object_sha256
 		LEFT JOIN objects t ON t.sha256 = j.target_object_sha256
 		WHERE j.id = $1`
@@ -752,7 +941,7 @@ func getProcessingJobTx(ctx context.Context, tx *sql.Tx, id, owner string) (Proc
 
 func aliasSelect() string {
 	return `SELECT
-			a.slug, COALESCE(a.object_sha256, ''), COALESCE(o.object_key, ''), a.owner_subject, a.display_filename, a.visibility,
+			a.slug, a.redirect_to_slug, COALESCE(a.object_sha256, ''), COALESCE(o.object_key, ''), a.owner_subject, a.display_filename, a.visibility,
 			a.status, a.error, a.created_at, a.updated_at, a.redirect_count, a.last_redirected_at,
 			COALESCE(o.size_bytes, 0), COALESCE(o.content_type, ''),
 			COALESCE(o.width, 0), COALESCE(o.height, 0), COALESCE(o.thumbnail_key, '')
@@ -768,6 +957,7 @@ func scanAlias(row scanner, alias *ShareAlias) error {
 	var last sql.NullTime
 	if err := row.Scan(
 		&alias.Slug,
+		&alias.RedirectToSlug,
 		&alias.ObjectSHA256,
 		&alias.ObjectKey,
 		&alias.Owner,
@@ -798,4 +988,11 @@ func nullString(value string) sql.NullString {
 		return sql.NullString{}
 	}
 	return sql.NullString{String: value, Valid: true}
+}
+
+func nullTime(value time.Time) sql.NullTime {
+	if value.IsZero() {
+		return sql.NullTime{}
+	}
+	return sql.NullTime{Time: value, Valid: true}
 }

@@ -162,7 +162,7 @@ func (m *memoryMetadata) ListAliases(_ context.Context, owner, query string, lim
 	}
 	var aliases []ShareAlias
 	for _, alias := range m.aliases {
-		if alias.Owner != owner || alias.Visibility == "deleted" {
+		if alias.Owner != owner || alias.Visibility == "deleted" || alias.RedirectToSlug != "" {
 			continue
 		}
 		if query != "" && !aliasMatchesQuery(alias, query) {
@@ -185,16 +185,25 @@ func aliasMatchesQuery(alias ShareAlias, query string) bool {
 
 func (m *memoryMetadata) DeleteAlias(_ context.Context, slug, owner string) (DeletedShare, bool, error) {
 	alias, ok := m.aliases[slug]
-	if !ok || alias.Owner != owner || alias.Visibility == "deleted" {
+	if !ok || alias.Owner != owner || alias.Visibility == "deleted" || alias.RedirectToSlug != "" {
 		return DeletedShare{}, false, nil
 	}
-	alias.Visibility = "deleted"
-	alias.UpdatedAt = time.Date(2026, 6, 28, 12, 2, 0, 0, time.UTC)
-	m.aliases[slug] = alias
+	related := map[string]bool{slug: true}
+	for name, other := range m.aliases {
+		if other.Owner == owner && other.RedirectToSlug == slug && other.Visibility != "deleted" {
+			related[name] = true
+		}
+	}
+	for name := range related {
+		other := m.aliases[name]
+		other.Visibility = "deleted"
+		other.UpdatedAt = time.Date(2026, 6, 28, 12, 2, 0, 0, time.UTC)
+		m.aliases[name] = other
+	}
 
 	deleted := DeletedShare{Alias: alias}
 	for id, job := range m.jobs {
-		if job.AliasSlug != slug || job.Owner != owner {
+		if !related[job.AliasSlug] || job.Owner != owner {
 			continue
 		}
 		if job.Status == ProcessingStatusQueued || job.Status == ProcessingStatusRunning {
@@ -209,7 +218,7 @@ func (m *memoryMetadata) DeleteAlias(_ context.Context, slug, owner string) (Del
 	if alias.ObjectSHA256 != "" && alias.ObjectKey != "" {
 		references := 0
 		for _, other := range m.aliases {
-			if other.ObjectSHA256 == alias.ObjectSHA256 && other.Visibility != "deleted" {
+			if other.ObjectSHA256 == alias.ObjectSHA256 && other.Visibility != "deleted" && other.RedirectToSlug == "" {
 				references++
 			}
 		}
@@ -225,7 +234,56 @@ func (m *memoryMetadata) DeleteAlias(_ context.Context, slug, owner string) (Del
 	return deleted, true, nil
 }
 
+func (m *memoryMetadata) RenameAlias(_ context.Context, slug, owner, newSlug string) (ShareAlias, bool, error) {
+	alias, ok := m.aliases[slug]
+	if !ok || alias.Owner != owner || alias.Visibility == "deleted" || alias.RedirectToSlug != "" {
+		return ShareAlias{}, false, nil
+	}
+	if slug == newSlug {
+		return alias, true, nil
+	}
+	if _, exists := m.aliases[newSlug]; exists {
+		return ShareAlias{}, false, ErrAliasExists
+	}
+	related := map[string]bool{slug: true}
+	for name, other := range m.aliases {
+		if other.Owner == owner && other.RedirectToSlug == slug && other.Visibility != "deleted" {
+			related[name] = true
+		}
+	}
+	renamed := alias
+	renamed.Slug = newSlug
+	renamed.RedirectToSlug = ""
+	renamed.DisplayFilename = newSlug
+	renamed.UpdatedAt = time.Date(2026, 6, 28, 12, 7, 0, 0, time.UTC)
+	m.aliases[newSlug] = renamed
+	for name := range related {
+		other := m.aliases[name]
+		other.RedirectToSlug = newSlug
+		other.UpdatedAt = renamed.UpdatedAt
+		m.aliases[name] = other
+	}
+	return renamed, true, nil
+}
+
+func (m *memoryMetadata) currentAlias(slug string) (ShareAlias, bool) {
+	for redirects := 0; redirects < 100; redirects++ {
+		alias, ok := m.aliases[slug]
+		if !ok || alias.Visibility == "deleted" {
+			return ShareAlias{}, false
+		}
+		if alias.RedirectToSlug == "" {
+			return alias, true
+		}
+		slug = alias.RedirectToSlug
+	}
+	return ShareAlias{}, false
+}
+
 func (m *memoryMetadata) CreateIngestJob(_ context.Context, job ProcessingJob, alias ShareAlias) (ProcessingJob, error) {
+	if _, exists := m.aliases[alias.Slug]; exists {
+		return ProcessingJob{}, ErrAliasExists
+	}
 	alias.Status = AliasStatusPending
 	alias.Visibility = "public"
 	if err := m.upsertAlias(alias); err != nil {
@@ -243,6 +301,9 @@ func (m *memoryMetadata) GetProcessingJob(_ context.Context, id, owner string) (
 	job, ok := m.jobs[id]
 	if !ok || (owner != "" && job.Owner != owner) {
 		return ProcessingJob{}, false, nil
+	}
+	if alias, found := m.currentAlias(job.AliasSlug); found {
+		job.AliasSlug = alias.Slug
 	}
 	return job, true, nil
 }
@@ -270,6 +331,15 @@ func (m *memoryMetadata) CompleteProcessingJob(_ context.Context, id string, obj
 		object.Status = "ready"
 	}
 	m.objects[object.SHA256] = object
+	currentAlias, ok := m.currentAlias(job.AliasSlug)
+	if !ok {
+		return errors.New("share alias not found")
+	}
+	alias.Slug = currentAlias.Slug
+	alias.Owner = currentAlias.Owner
+	alias.DisplayFilename = currentAlias.DisplayFilename
+	alias.Visibility = currentAlias.Visibility
+	alias.RedirectToSlug = currentAlias.RedirectToSlug
 	if err := m.upsertAlias(alias); err != nil {
 		return err
 	}
@@ -301,10 +371,10 @@ func (m *memoryMetadata) FailProcessingJob(_ context.Context, id, message string
 	job.CompletedAt = time.Date(2026, 6, 28, 12, 5, 0, 0, time.UTC)
 	job.UpdatedAt = job.CompletedAt
 	m.jobs[id] = job
-	if alias, ok := m.aliases[job.AliasSlug]; ok && alias.Visibility != "deleted" {
+	if alias, ok := m.currentAlias(job.AliasSlug); ok {
 		alias.Status = AliasStatusFailed
 		alias.Error = message
-		m.aliases[job.AliasSlug] = alias
+		m.aliases[alias.Slug] = alias
 	}
 	return nil
 }
@@ -378,10 +448,15 @@ func setCSRF(request *http.Request) {
 	request.Header.Set(csrfHeaderName, "csrf-token")
 }
 
-func multipartUpload(t *testing.T, fieldName, filename, contentType string, body []byte, alias string) (*bytes.Buffer, string) {
+func multipartUpload(t *testing.T, fieldName, filename, contentType string, body []byte, name string) (*bytes.Buffer, string) {
 	t.Helper()
 	var buffer bytes.Buffer
 	writer := multipart.NewWriter(&buffer)
+	if name != "" {
+		if err := writer.WriteField("name", name); err != nil {
+			t.Fatal(err)
+		}
+	}
 	part, err := writer.CreatePart(textprotoMIMEHeader(map[string]string{
 		"Content-Disposition": `form-data; name="` + fieldName + `"; filename="` + filename + `"`,
 		"Content-Type":        contentType,
@@ -391,11 +466,6 @@ func multipartUpload(t *testing.T, fieldName, filename, contentType string, body
 	}
 	if _, err := part.Write(body); err != nil {
 		t.Fatal(err)
-	}
-	if alias != "" {
-		if err := writer.WriteField("alias", alias); err != nil {
-			t.Fatal(err)
-		}
 	}
 	if err := writer.Close(); err != nil {
 		t.Fatal(err)
@@ -579,11 +649,11 @@ func TestCreateUploadReportsMultipartBodyTooLarge(t *testing.T) {
 	}
 }
 
-func TestCreateUploadRejectsCustomAliasField(t *testing.T) {
+func TestCreateUploadUsesRequestedNameAndFinalExtension(t *testing.T) {
 	cfg := testConfig(t)
 	metadata := newMemoryMetadata()
 	server := NewServer(cfg, authenticatedFakeAuth("user-1"), &fakeStore{}, metadata, slog.Default())
-	body, contentType := multipartUpload(t, "file", "demo.txt", "text/plain", []byte("replacement"), "demo")
+	body, contentType := multipartUpload(t, "file", "img_8388.mov", "video/quicktime", []byte("replacement"), "Tiddies.jpg")
 	request := httptest.NewRequest(http.MethodPost, "/api/uploads", body)
 	request.Header.Set("Content-Type", contentType)
 	setCSRF(request)
@@ -591,7 +661,38 @@ func TestCreateUploadRejectsCustomAliasField(t *testing.T) {
 
 	server.ServeHTTP(recorder, request)
 
-	if recorder.Code != http.StatusBadRequest {
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	var response createUploadResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Slug != "tiddies.mp4" {
+		t.Fatalf("slug = %q", response.Slug)
+	}
+	if alias := metadata.aliases[response.Slug]; alias.DisplayFilename != "tiddies.mp4" {
+		t.Fatalf("alias = %#v", alias)
+	}
+	if job := metadata.jobs[response.JobID]; job.DisplayFilename != "img_8388.mov" || job.Profile != ProcessingProfileMP4Web {
+		t.Fatalf("job = %#v", job)
+	}
+}
+
+func TestCreateUploadRejectsOccupiedName(t *testing.T) {
+	cfg := testConfig(t)
+	metadata := newMemoryMetadata()
+	metadata.aliases["taken.txt"] = ShareAlias{Slug: "taken.txt", Owner: "user-1", DisplayFilename: "taken.txt", Visibility: "public", Status: AliasStatusReady}
+	server := NewServer(cfg, authenticatedFakeAuth("user-1"), &fakeStore{}, metadata, slog.Default())
+	body, contentType := multipartUpload(t, "file", "demo.txt", "text/plain", []byte("replacement"), "taken.txt")
+	request := httptest.NewRequest(http.MethodPost, "/api/uploads", body)
+	request.Header.Set("Content-Type", contentType)
+	setCSRF(request)
+	recorder := httptest.NewRecorder()
+
+	server.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusConflict {
 		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
 	}
 	if len(metadata.jobs) != 0 {
@@ -948,6 +1049,94 @@ func TestListSharesSearchMatchesStatusAndHonorsLimit(t *testing.T) {
 	}
 }
 
+func TestRenameShareUpdatesDisplayNameAndPermanentlyRedirectsOldName(t *testing.T) {
+	metadata := newMemoryMetadata()
+	key := "01/" + testSHA256 + ".mp4"
+	metadata.objects[testSHA256] = StoredObject{SHA256: testSHA256, ObjectKey: key, Size: 12, ContentType: "video/mp4", Status: "ready"}
+	metadata.aliases["img_8388-562377a03a739138.mp4"] = ShareAlias{
+		Slug:            "img_8388-562377a03a739138.mp4",
+		ObjectSHA256:    testSHA256,
+		ObjectKey:       key,
+		Owner:           "user-1",
+		DisplayFilename: "img_8388-562377a03a739138.mp4",
+		Visibility:      "public",
+		Status:          AliasStatusReady,
+		ContentType:     "video/mp4",
+	}
+	metadata.jobs["job-1"] = ProcessingJob{ID: "job-1", Owner: "user-1", AliasSlug: "img_8388-562377a03a739138.mp4", Status: ProcessingStatusQueued}
+	server := NewServer(testConfig(t), authenticatedFakeAuth("user-1"), &fakeStore{}, metadata, slog.Default())
+	request := httptest.NewRequest(http.MethodPatch, "/api/shares/img_8388-562377a03a739138.mp4", strings.NewReader(`{"name":"Tiddies.jpg"}`))
+	setCSRF(request)
+	recorder := httptest.NewRecorder()
+
+	server.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	var renamed ShareAlias
+	if err := json.Unmarshal(recorder.Body.Bytes(), &renamed); err != nil {
+		t.Fatal(err)
+	}
+	if renamed.Slug != "tiddies.mp4" || renamed.DisplayFilename != "tiddies.mp4" || renamed.PublicURL != "https://share.doesthings.online/s/tiddies.mp4" {
+		t.Fatalf("renamed = %#v", renamed)
+	}
+	old := metadata.aliases["img_8388-562377a03a739138.mp4"]
+	job, found, err := metadata.GetProcessingJob(context.Background(), "job-1", "user-1")
+	if err != nil || !found || old.RedirectToSlug != "tiddies.mp4" || job.AliasSlug != "tiddies.mp4" {
+		t.Fatalf("old = %#v, job = %#v, found = %t, err = %v", old, job, found, err)
+	}
+	request = httptest.NewRequest(http.MethodPatch, "/api/shares/tiddies.mp4", strings.NewReader(`{"name":"latest.mp4"}`))
+	setCSRF(request)
+	recorder = httptest.NewRecorder()
+	server.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("second rename status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	if metadata.aliases["img_8388-562377a03a739138.mp4"].RedirectToSlug != "latest.mp4" || metadata.aliases["tiddies.mp4"].RedirectToSlug != "latest.mp4" {
+		t.Fatalf("aliases = %#v", metadata.aliases)
+	}
+
+	request = httptest.NewRequest(http.MethodGet, "/s/img_8388-562377a03a739138.mp4/media?range=1", nil)
+	recorder = httptest.NewRecorder()
+	server.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusPermanentRedirect {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	if location := recorder.Header().Get("Location"); location != "https://share.doesthings.online/s/latest.mp4/media?range=1" {
+		t.Fatalf("location = %q", location)
+	}
+
+	request = httptest.NewRequest(http.MethodGet, "/api/shares", nil)
+	recorder = httptest.NewRecorder()
+	server.ServeHTTP(recorder, request)
+	var list listSharesResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &list); err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Shares) != 1 || list.Shares[0].Slug != "latest.mp4" {
+		t.Fatalf("shares = %#v", list.Shares)
+	}
+}
+
+func TestRenameShareRejectsOccupiedOrRetiredName(t *testing.T) {
+	metadata := newMemoryMetadata()
+	metadata.aliases["mine.mp4"] = ShareAlias{Slug: "mine.mp4", Owner: "user-1", DisplayFilename: "mine.mp4", Visibility: "public", Status: AliasStatusReady}
+	metadata.aliases["taken.mp4"] = ShareAlias{Slug: "taken.mp4", Owner: "user-2", DisplayFilename: "taken.mp4", Visibility: "public", Status: AliasStatusReady}
+	metadata.aliases["retired.mp4"] = ShareAlias{Slug: "retired.mp4", RedirectToSlug: "mine.mp4", Owner: "user-1", DisplayFilename: "retired.mp4", Visibility: "public", Status: AliasStatusReady}
+	server := NewServer(testConfig(t), authenticatedFakeAuth("user-1"), &fakeStore{}, metadata, slog.Default())
+
+	for _, name := range []string{"taken.mp4", "retired.mp4"} {
+		request := httptest.NewRequest(http.MethodPatch, "/api/shares/mine.mp4", strings.NewReader(`{"name":"`+name+`"}`))
+		setCSRF(request)
+		recorder := httptest.NewRecorder()
+		server.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusConflict {
+			t.Fatalf("name %q status = %d, body = %s", name, recorder.Code, recorder.Body.String())
+		}
+	}
+}
+
 func TestParseShareLimitDefaultsAndCaps(t *testing.T) {
 	tests := map[string]int{
 		"":     50,
@@ -1015,6 +1204,31 @@ func TestDeleteShareRemovesUnreferencedB2ObjectAndPreservesStats(t *testing.T) {
 	}
 	if metadata.objects[testSHA256].Status != "deleted" {
 		t.Fatalf("object = %#v", metadata.objects[testSHA256])
+	}
+}
+
+func TestDeleteRenamedShareRemovesRedirectAliasesAndObject(t *testing.T) {
+	metadata := newMemoryMetadata()
+	key := "01/" + testSHA256 + ".mp4"
+	metadata.objects[testSHA256] = StoredObject{SHA256: testSHA256, ObjectKey: key, Size: 12, ContentType: "video/mp4", Status: "ready"}
+	metadata.aliases["old.mp4"] = ShareAlias{Slug: "old.mp4", RedirectToSlug: "current.mp4", ObjectSHA256: testSHA256, ObjectKey: key, Owner: "user-1", Visibility: "public", Status: AliasStatusReady}
+	metadata.aliases["current.mp4"] = ShareAlias{Slug: "current.mp4", ObjectSHA256: testSHA256, ObjectKey: key, Owner: "user-1", Visibility: "public", Status: AliasStatusReady}
+	store := &fakeStore{objects: map[string][]byte{key: []byte("video")}}
+	server := NewServer(testConfig(t), authenticatedFakeAuth("user-1"), store, metadata, slog.Default())
+	request := httptest.NewRequest(http.MethodDelete, "/api/shares/current.mp4", nil)
+	setCSRF(request)
+	recorder := httptest.NewRecorder()
+
+	server.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	if metadata.aliases["old.mp4"].Visibility != "deleted" || metadata.aliases["current.mp4"].Visibility != "deleted" {
+		t.Fatalf("aliases = %#v", metadata.aliases)
+	}
+	if len(store.deleted) != 1 || store.deleted[0] != key {
+		t.Fatalf("deleted = %#v", store.deleted)
 	}
 }
 

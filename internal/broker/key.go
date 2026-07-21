@@ -61,6 +61,36 @@ func GenerateRandomAliasSlug(filename, extension string) (string, error) {
 	return base + "-" + suffix + extension, nil
 }
 
+// NormalizeAliasSlug turns a user-supplied share name into a safe public slug.
+// The final extension belongs to the processed file and cannot be changed here.
+func NormalizeAliasSlug(value, extension string) string {
+	value = strings.TrimSpace(value)
+	value = strings.TrimPrefix(value, "/")
+	value = strings.TrimPrefix(value, "s/")
+	value = strings.TrimPrefix(value, "/s/")
+	if value == "" {
+		value = "share"
+	}
+	value = strings.ToLower(SanitizeFilename(value))
+	valueExtension := path.Ext(value)
+	base := strings.Trim(strings.TrimSuffix(value, valueExtension), ".-_")
+	if base == "" {
+		base = "share"
+	}
+
+	extension = normalizeExtension(extension)
+	if extension == "" {
+		extension = normalizeExtension(valueExtension)
+	}
+	if limit := 180 - len(extension); len(base) > limit {
+		base = strings.Trim(base[:limit], ".-_")
+	}
+	if base == "" {
+		base = "share"
+	}
+	return base + extension
+}
+
 func ExtensionFor(filename, contentType string) string {
 	name := SanitizeFilename(filename)
 	if ext := normalizeExtension(path.Ext(name)); ext != "" {

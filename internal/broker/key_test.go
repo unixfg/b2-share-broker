@@ -64,6 +64,20 @@ func TestGenerateRandomAliasSlugFallsBackToFilenameExtension(t *testing.T) {
 	}
 }
 
+func TestNormalizeAliasSlugPreservesRequiredExtension(t *testing.T) {
+	tests := map[string]string{
+		"Tiddies.jpg":        "tiddies.mp4",
+		"/s/Latest Clip.mov": "latest_clip.mp4",
+		"../../report":       "report.mp4",
+		"":                   "share.mp4",
+	}
+	for input, want := range tests {
+		if got := NormalizeAliasSlug(input, ".mp4"); got != want {
+			t.Fatalf("NormalizeAliasSlug(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
 func TestExtensionFor(t *testing.T) {
 	if got := ExtensionFor("photo.HEIC", "application/octet-stream"); got != ".heic" {
 		t.Fatalf("extension = %q", got)

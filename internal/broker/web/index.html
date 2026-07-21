@@ -37,6 +37,14 @@
             </label>
             <input id="fileInput" class="file-input" name="file" type="file">
             <div id="mediaWarning" class="media-warning hidden"></div>
+            <label class="field" for="nameInput">
+              <span>Share name</span>
+              <span class="name-control">
+                <input id="nameInput" type="text" autocomplete="off" spellcheck="false" disabled>
+                <output id="nameExtension" class="name-extension"></output>
+              </span>
+              <span id="nameHint" class="field-hint">Choose a file to generate a public name.</span>
+            </label>
 
             <div class="actions">
               <button class="button primary" id="uploadButton" type="submit" disabled>Upload</button>
