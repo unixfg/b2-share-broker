@@ -43,6 +43,8 @@ Unauthenticated public share link.
   endpoint fetches count as opens so embed traffic is visible in stats;
   thumbnail fetches do not. Crawler fetches of the unfurl page itself do not
   count as redirects.
+- Renamed shares permanently redirect their former `/s/{slug}` URLs, including
+  `/media` and `/thumbnail` variants, to the current name.
 
 ### `GET /s/{slug}/media`, `GET /s/{slug}/thumbnail`
 
@@ -66,21 +68,25 @@ OIDC bearer token with the configured share role.
 Request is `multipart/form-data`:
 
 - `file`: required, exactly one file
+- `name`: optional public share name; its extension is replaced with the final
+  stored file extension
 
 Response:
 
 ```json
 {
-  "shareUrl": "https://share.doesthings.online/s/0123abcd89ef4567-screenshot_1.png",
-  "slug": "0123abcd89ef4567-screenshot_1.png",
+  "shareUrl": "https://share.doesthings.online/s/screenshot_1-0123abcd89ef4567.png",
+  "slug": "screenshot_1-0123abcd89ef4567.png",
   "jobId": "9f4e04ba-4a59-4d5b-aa08-74827eea7469",
   "status": "queued"
 }
 ```
 
-Generated aliases use a random 16-hex prefix plus a sanitized filename and the
-final output extension. Video uploads get `.mp4` aliases because the processor
-normalizes them before publication. Custom aliases are not supported.
+When `name` is omitted, the broker generates a random 16-hex suffix plus a
+sanitized filename and final output extension. A supplied name is normalized to
+a safe lowercase slug. Its extension is immutable: video uploads always use
+`.mp4`, and other files retain their detected final extension. Names must be
+globally unique, including retired names that continue redirecting old links.
 
 ### `GET /api/uploads/{jobId}`
 
@@ -89,20 +95,35 @@ SHA-256 and B2 object key.
 
 ### `GET /api/shares`
 
-Returns recent aliases owned by the current subject with filenames, sizes,
-content types, status, redirect counts, share URLs, and native B2 URLs when the
-share is ready.
+Returns recent current share names owned by the current subject with filenames,
+sizes, content types, status, redirect counts, share URLs, and native B2 URLs
+when the share is ready. Retired names are not listed.
+
+### `PATCH /api/shares/{slug}`
+
+Requires owner auth. Browser requests also require `X-CSRF-Token`.
+
+Renames a current share with a JSON body such as:
+
+```json
+{"name":"tiddies.mp4"}
+```
+
+The original file extension remains enforced regardless of the extension in
+`name`. The response is the renamed share. The old public URL remains valid and
+permanently redirects to the new URL; it cannot be reused by another share.
 
 ### `DELETE /api/shares/{slug}`
 
 Requires owner auth. Browser requests also require `X-CSRF-Token`.
 
-Deletion keeps the alias row as soft-deleted metadata so redirect counts and
-history survive. Staged files and queued jobs for that alias are removed or
-canceled. The B2 object is hard-deleted only when no non-deleted aliases still
-reference it. Because B2 buckets are always versioned and a key-only S3 delete
-only hides the latest version, hard deletion removes every version and hide
-marker for the object key by version ID.
+Deletion keeps the current alias and all of its retired redirect aliases as
+soft-deleted metadata so redirect counts and history survive. Staged files and
+queued jobs for that share are removed or canceled. The B2 object is
+hard-deleted only when no non-deleted current aliases still reference it.
+Because B2 buckets are always versioned and a key-only S3 delete only hides the
+latest version, hard deletion removes every version and hide marker for the
+object key by version ID.
 
 ## Object Storage
 

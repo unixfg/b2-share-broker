@@ -31,7 +31,9 @@ export FILE="./clip.mp4"
 
 curl -sS -X POST "https://share.doesthings.online/api/uploads" \
   -H "Authorization: Bearer ${TOKEN}" \
-  -F "file=@${FILE}"</code></pre>
+  -F "file=@${FILE}" \
+  -F "name=my-share.mp4"</code></pre>
+          <p class="doc-copy">The name is optional. The broker enforces the processed file extension, so video names always end in <code>.mp4</code>.</p>
         </section>
 
         <section class="doc-section">
@@ -43,9 +45,18 @@ curl -sS -X POST "https://share.doesthings.online/api/uploads" \
 
         <section class="doc-section">
           <h2>History</h2>
-          <p class="doc-copy">History is owner-only. Search matches filename, slug, content type, and status.</p>
+          <p class="doc-copy">History is owner-only. Click a current name to rename it; old public names permanently redirect and are not listed. Search matches filename, slug, content type, and status.</p>
           <pre><code>curl -sS "https://share.doesthings.online/api/shares?q=mp4" \
   -H "Authorization: Bearer ${TOKEN}"</code></pre>
+        </section>
+
+        <section class="doc-section">
+          <h2>Rename</h2>
+          <p class="doc-copy">Renaming keeps every prior public URL valid and redirects it to the current name.</p>
+          <pre><code>curl -sS -X PATCH "https://share.doesthings.online/api/shares/${SLUG}" \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H "Content-Type: application/json" \
+  --data '{"name":"tiddies.mp4"}'</code></pre>
         </section>
 
         <section class="doc-section">

@@ -213,6 +213,59 @@ pre {
   white-space: nowrap;
 }
 
+.field {
+  display: grid;
+  gap: 6px;
+  margin-top: 14px;
+  color: var(--muted);
+  font-size: 0.9rem;
+  font-weight: 680;
+}
+
+.name-control {
+  display: flex;
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--field);
+  color: var(--ink);
+}
+
+.name-control input {
+  min-width: 0;
+  flex: 1 1 auto;
+  min-height: 40px;
+  padding: 0 12px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+}
+
+.name-control input:focus {
+  outline: 3px solid color-mix(in srgb, var(--focus) 26%, transparent);
+  outline-offset: -3px;
+}
+
+.name-control input:disabled {
+  cursor: not-allowed;
+}
+
+.name-extension {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  padding: 0 12px 0 0;
+  color: var(--muted);
+  font-weight: 680;
+}
+
+.field-hint {
+  font-size: 0.82rem;
+  font-weight: 500;
+}
+
 .button {
   display: inline-flex;
   align-items: center;
@@ -328,6 +381,35 @@ pre {
 .history-title {
   overflow-wrap: anywhere;
   font-weight: 720;
+}
+
+.history-name-button {
+  width: fit-content;
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.history-name-button:hover,
+.history-name-button:focus-visible {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.history-rename {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.history-rename .name-control {
+  flex: 1 1 220px;
 }
 
 .history-error {

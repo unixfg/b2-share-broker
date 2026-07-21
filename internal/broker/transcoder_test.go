@@ -91,6 +91,40 @@ func TestProcessorFinalizesNonVideoUpload(t *testing.T) {
 	}
 }
 
+func TestProcessorCompletesRunningJobAtRenamedAlias(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.TranscoderWorkDir = t.TempDir()
+	stagingPath := filepath.Join(cfg.StagingDir, "job-1.txt.upload")
+	if err := os.WriteFile(stagingPath, []byte("hello"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	metadata := newMemoryMetadata()
+	metadata.aliases["old-name.txt"] = ShareAlias{Slug: "old-name.txt", Owner: "user-1", DisplayFilename: "old-name.txt", Visibility: "public", Status: AliasStatusPending}
+	metadata.jobs["job-1"] = ProcessingJob{ID: "job-1", Owner: "user-1", AliasSlug: "old-name.txt", StagingPath: stagingPath, Profile: ProcessingProfileUploadFinalize, Status: ProcessingStatusQueued, DisplayFilename: "source.txt", SourceType: "text/plain"}
+	store := &fakeStore{}
+	transcoder := NewTranscoder(cfg, store, metadata, fakeMediaRunner{}, slog.Default())
+	job, found, err := metadata.ClaimNextProcessingJob(context.Background(), "worker")
+	if err != nil || !found {
+		t.Fatalf("claimed job = %#v, found = %t, err = %v", job, found, err)
+	}
+	if _, found, err := metadata.RenameAlias(context.Background(), "old-name.txt", "user-1", "new-name.txt"); err != nil || !found {
+		t.Fatalf("rename found = %t, err = %v", found, err)
+	}
+
+	if err := transcoder.processJob(context.Background(), job); err != nil {
+		t.Fatal(err)
+	}
+
+	targetSHA := sha256Hex([]byte("hello"))
+	completed, found, err := metadata.GetProcessingJob(context.Background(), "job-1", "user-1")
+	if err != nil || !found || completed.AliasSlug != "new-name.txt" || metadata.aliases["new-name.txt"].ObjectSHA256 != targetSHA {
+		t.Fatalf("job = %#v, found = %t, err = %v, alias = %#v", completed, found, err, metadata.aliases["new-name.txt"])
+	}
+	if old := metadata.aliases["old-name.txt"]; old.RedirectToSlug != "new-name.txt" || old.ObjectSHA256 != "" {
+		t.Fatalf("old alias = %#v", old)
+	}
+}
+
 func TestProcessorRemuxesWebMP4BeforeHashAndUpload(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.TranscoderWorkDir = t.TempDir()
