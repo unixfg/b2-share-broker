@@ -35,6 +35,12 @@ Unauthenticated public share link.
 - Failed shares return a minimal unavailable page.
 - Ready shares increment redirect stats and redirect to the native public B2
   URL.
+- Ready shares requested by known link unfurlers (Discord, Slack, iMessage,
+  Mastodon, and similar crawlers) instead receive a minimal Open Graph page so
+  chat apps embed the media inline: `og:video*` tags point at the B2 object URL
+  (with dimensions when known), `og:image` uses the extracted video thumbnail
+  or the image object itself, and the share URL stays the permanent permalink.
+  Crawler fetches do not count as redirects.
 
 The cluster does not proxy downloaded file bytes.
 
@@ -122,6 +128,12 @@ ffmpeg -hide_banner -y -i input -map 0 -c copy -movflags +faststart output.mp4
 If remux fails or the remuxed MP4 is not H.264/AAC, the processor transcodes to
 H.264/AAC MP4 with `h264_nvenc`. Original uploaded bytes are temporary staging
 files and are not uploaded to the public bucket.
+
+Processed videos are also probed for width and height, and a single-frame JPEG
+thumbnail (seek 1s, falling back to 0s, capped at 1280px wide) is uploaded as a
+sibling object keyed `<sha>.jpg` next to the `<sha>.mp4` video object. Both feed
+the Open Graph unfurl page, and both are deleted together when the last
+referencing share is removed.
 
 Each upload's source bytes are hashed while streaming to staging and recorded on
 the job. Completed jobs record a derivative from that source hash to the final

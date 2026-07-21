@@ -18,6 +18,11 @@ type fakeMediaRunner struct {
 	webMP4          bool
 	remuxErr        error
 	transcodeErr    error
+	width           int
+	height          int
+	dimensionsErr   error
+	thumbnailOutput []byte
+	thumbnailErr    error
 }
 
 func (r fakeMediaRunner) FastStartRemux(_ context.Context, _, outputPath string) error {
@@ -36,6 +41,17 @@ func (r fakeMediaRunner) TranscodeMP4(_ context.Context, _, outputPath string) e
 
 func (r fakeMediaRunner) IsWebMP4(context.Context, string) (bool, error) {
 	return r.webMP4, nil
+}
+
+func (r fakeMediaRunner) VideoDimensions(context.Context, string) (int, int, error) {
+	return r.width, r.height, r.dimensionsErr
+}
+
+func (r fakeMediaRunner) ExtractThumbnail(_ context.Context, _, outputPath string) error {
+	if r.thumbnailErr != nil {
+		return r.thumbnailErr
+	}
+	return os.WriteFile(outputPath, r.thumbnailOutput, 0o600)
 }
 
 func TestProcessorFinalizesNonVideoUpload(t *testing.T) {
@@ -211,6 +227,40 @@ func TestProcessorTranscodesWhenDerivativeTargetIsUnavailable(t *testing.T) {
 	}
 	if len(metadata.unavailable) != 1 || metadata.unavailable[0] != targetSHA {
 		t.Fatalf("unavailable = %#v", metadata.unavailable)
+	}
+}
+
+func TestProcessorEnrichesVideoObjectWithDimensionsAndThumbnail(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.TranscoderWorkDir = t.TempDir()
+	stagingPath := filepath.Join(cfg.StagingDir, "job-1.mp4.upload")
+	if err := os.WriteFile(stagingPath, []byte("source"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	transcoded := []byte("transcoded-output")
+	metadata := newMemoryMetadata()
+	metadata.aliases["mine.mp4"] = ShareAlias{Slug: "mine.mp4", Owner: "user-1", DisplayFilename: "input.mkv", Visibility: "public", Status: AliasStatusPending}
+	metadata.jobs["job-1"] = ProcessingJob{ID: "job-1", Owner: "user-1", AliasSlug: "mine.mp4", StagingPath: stagingPath, Profile: ProcessingProfileMP4Web, Status: ProcessingStatusQueued, DisplayFilename: "input.mkv", SourceType: "video/x-matroska"}
+	store := &fakeStore{}
+	runner := fakeMediaRunner{remuxOutput: []byte("remux"), transcodeOutput: transcoded, width: 1920, height: 1080, thumbnailOutput: []byte("jpeg-bytes")}
+	transcoder := NewTranscoder(cfg, store, metadata, runner, slog.Default())
+
+	processed, err := transcoder.ProcessNext(context.Background())
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !processed {
+		t.Fatal("expected a job to be processed")
+	}
+	targetSHA := sha256Hex(transcoded)
+	thumbnailKey := targetSHA[:2] + "/" + targetSHA + ".jpg"
+	object := metadata.objects[targetSHA]
+	if object.Width != 1920 || object.Height != 1080 || object.ThumbnailKey != thumbnailKey {
+		t.Fatalf("object = %#v", object)
+	}
+	if string(store.objects[thumbnailKey]) != "jpeg-bytes" {
+		t.Fatalf("thumbnail bytes = %q", store.objects[thumbnailKey])
 	}
 }
 

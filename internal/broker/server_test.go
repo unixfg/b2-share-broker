@@ -219,6 +219,7 @@ func (m *memoryMetadata) DeleteAlias(_ context.Context, slug, owner string) (Del
 			object.DeletedAt = time.Date(2026, 6, 28, 12, 2, 0, 0, time.UTC)
 			m.objects[alias.ObjectSHA256] = object
 			deleted.ObjectKey = alias.ObjectKey
+			deleted.ThumbnailKey = alias.ThumbnailKey
 		}
 	}
 	return deleted, true, nil
@@ -334,6 +335,9 @@ func (m *memoryMetadata) upsertAlias(alias ShareAlias) error {
 		alias.ObjectKey = object.ObjectKey
 		alias.Size = object.Size
 		alias.ContentType = object.ContentType
+		alias.Width = object.Width
+		alias.Height = object.Height
+		alias.ThumbnailKey = object.ThumbnailKey
 	}
 	if alias.CreatedAt.IsZero() {
 		alias.CreatedAt = time.Date(2026, 6, 28, 12, 0, 0, 0, time.UTC)
@@ -678,6 +682,89 @@ func TestPublicShareStatesAndRedirect(t *testing.T) {
 	}
 }
 
+func TestPublicShareServesUnfurlPageToCrawlers(t *testing.T) {
+	cfg := testConfig(t)
+	metadata := newMemoryMetadata()
+	key := "01/" + testSHA256 + ".mp4"
+	thumbnailKey := "01/" + testSHA256 + ".jpg"
+	mediaURL := "https://bucket.s3.us-west-004.backblazeb2.com/" + key
+	thumbnailURL := "https://bucket.s3.us-west-004.backblazeb2.com/" + thumbnailKey
+	metadata.objects[testSHA256] = StoredObject{SHA256: testSHA256, ObjectKey: key, Size: 12582912, ContentType: "video/mp4", Status: "ready", Width: 1920, Height: 1080, ThumbnailKey: thumbnailKey}
+	metadata.aliases["ready.mp4"] = ShareAlias{Slug: "ready.mp4", ObjectSHA256: testSHA256, ObjectKey: key, Owner: "user-1", DisplayFilename: "Launch Clip.mp4", Visibility: "public", Status: AliasStatusReady, ContentType: "video/mp4", Size: 12582912, Width: 1920, Height: 1080, ThumbnailKey: thumbnailKey}
+	server := NewServer(cfg, fakeAuth{err: ErrUnauthorized}, &fakeStore{}, metadata, slog.Default())
+
+	request := httptest.NewRequest(http.MethodGet, "/s/ready.mp4", nil)
+	request.Header.Set("User-Agent", "Mozilla/5.0 (compatible; Discordbot/2.0; +https://discordapp.com)")
+	recorder := httptest.NewRecorder()
+
+	server.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	if location := recorder.Header().Get("Location"); location != "" {
+		t.Fatalf("unexpected redirect to %q", location)
+	}
+	body := recorder.Body.String()
+	for _, want := range []string{
+		`property="og:title" content="Launch Clip.mp4"`,
+		`property="og:type" content="video.other"`,
+		`property="og:url" content="https://share.doesthings.online/s/ready.mp4"`,
+		`property="og:site_name" content="share.doesthings.online"`,
+		`property="og:video" content="` + mediaURL + `"`,
+		`property="og:video:secure_url" content="` + mediaURL + `"`,
+		`property="og:video:type" content="video/mp4"`,
+		`property="og:video:width" content="1920"`,
+		`property="og:video:height" content="1080"`,
+		`property="og:image" content="` + thumbnailURL + `"`,
+		`name="theme-color"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("body missing %q:\n%s", want, body)
+		}
+	}
+	if metadata.aliases["ready.mp4"].RedirectCount != 0 {
+		t.Fatalf("crawler fetch counted as redirect: %d", metadata.aliases["ready.mp4"].RedirectCount)
+	}
+
+	request = httptest.NewRequest(http.MethodGet, "/s/ready.mp4", nil)
+	request.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)")
+	recorder = httptest.NewRecorder()
+	server.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusFound || recorder.Header().Get("Location") != mediaURL {
+		t.Fatalf("browser status = %d, location = %q", recorder.Code, recorder.Header().Get("Location"))
+	}
+}
+
+func TestPublicShareUnfurlPageOmitsOptionalTags(t *testing.T) {
+	cfg := testConfig(t)
+	metadata := newMemoryMetadata()
+	key := "01/" + testSHA256 + ".txt"
+	metadata.objects[testSHA256] = StoredObject{SHA256: testSHA256, ObjectKey: key, Size: 12, ContentType: "text/plain", Status: "ready"}
+	metadata.aliases["ready.txt"] = ShareAlias{Slug: "ready.txt", ObjectSHA256: testSHA256, ObjectKey: key, Owner: "user-1", DisplayFilename: "notes.txt", Visibility: "public", Status: AliasStatusReady, ContentType: "text/plain", Size: 12}
+	server := NewServer(cfg, fakeAuth{err: ErrUnauthorized}, &fakeStore{}, metadata, slog.Default())
+	request := httptest.NewRequest(http.MethodGet, "/s/ready.txt", nil)
+	request.Header.Set("User-Agent", "Slackbot-LinkExpanding 1.0")
+	recorder := httptest.NewRecorder()
+
+	server.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	body := recorder.Body.String()
+	for _, unwanted := range []string{"og:video", "og:image", "og:video:width"} {
+		if strings.Contains(body, unwanted) {
+			t.Fatalf("body unexpectedly contains %q:\n%s", unwanted, body)
+		}
+	}
+	for _, want := range []string{`property="og:title" content="notes.txt"`, `property="og:type" content="website"`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("body missing %q:\n%s", want, body)
+		}
+	}
+}
+
 func TestPublicShareCORSAllowsConfiguredOrigin(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.PublicShareCORSAllowedOrigins = []string{"https://discord.com"}
@@ -886,6 +973,28 @@ func TestDeleteShareRemovesUnreferencedB2ObjectAndPreservesStats(t *testing.T) {
 	}
 	if metadata.objects[testSHA256].Status != "deleted" {
 		t.Fatalf("object = %#v", metadata.objects[testSHA256])
+	}
+}
+
+func TestDeleteShareRemovesThumbnailWithUnreferencedObject(t *testing.T) {
+	metadata := newMemoryMetadata()
+	key := "01/" + testSHA256 + ".mp4"
+	thumbnailKey := "01/" + testSHA256 + ".jpg"
+	metadata.objects[testSHA256] = StoredObject{SHA256: testSHA256, ObjectKey: key, Size: 12, ContentType: "video/mp4", Status: "ready", ThumbnailKey: thumbnailKey}
+	metadata.aliases["mine.mp4"] = ShareAlias{Slug: "mine.mp4", ObjectSHA256: testSHA256, ObjectKey: key, Owner: "user-1", Visibility: "public", Status: AliasStatusReady, ThumbnailKey: thumbnailKey}
+	store := &fakeStore{objects: map[string][]byte{key: []byte("video"), thumbnailKey: []byte("jpeg")}}
+	server := NewServer(testConfig(t), authenticatedFakeAuth("user-1"), store, metadata, slog.Default())
+	request := httptest.NewRequest(http.MethodDelete, "/api/shares/mine.mp4", nil)
+	setCSRF(request)
+	recorder := httptest.NewRecorder()
+
+	server.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	if len(store.deleted) != 2 || store.deleted[0] != key || store.deleted[1] != thumbnailKey {
+		t.Fatalf("deleted = %#v", store.deleted)
 	}
 }
 

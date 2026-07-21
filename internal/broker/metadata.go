@@ -20,6 +20,9 @@ type StoredObject struct {
 	FirstFilename string    `json:"firstFilename"`
 	Uploader      string    `json:"uploader"`
 	Status        string    `json:"status"`
+	Width         int       `json:"width,omitempty"`
+	Height        int       `json:"height,omitempty"`
+	ThumbnailKey  string    `json:"thumbnailKey,omitempty"`
 	CreatedAt     time.Time `json:"createdAt"`
 	DeletedAt     time.Time `json:"deletedAt,omitempty"`
 }
@@ -39,6 +42,9 @@ type ShareAlias struct {
 	LastRedirectedAt time.Time `json:"lastRedirectedAt,omitempty"`
 	Size             int64     `json:"size"`
 	ContentType      string    `json:"contentType,omitempty"`
+	Width            int       `json:"width,omitempty"`
+	Height           int       `json:"height,omitempty"`
+	ThumbnailKey     string    `json:"thumbnailKey,omitempty"`
 	B2URL            string    `json:"b2Url,omitempty"`
 	PublicURL        string    `json:"publicUrl"`
 }
@@ -75,6 +81,7 @@ type ObjectDerivative struct {
 type DeletedShare struct {
 	Alias        ShareAlias
 	ObjectKey    string
+	ThumbnailKey string
 	StagingPaths []string
 }
 
@@ -151,6 +158,9 @@ func (s *PostgresMetadataStore) runMigrations(ctx context.Context) error {
 		)`,
 		`ALTER TABLE objects ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'ready'`,
 		`ALTER TABLE objects ADD COLUMN IF NOT EXISTS deleted_at timestamptz`,
+		`ALTER TABLE objects ADD COLUMN IF NOT EXISTS width integer NOT NULL DEFAULT 0`,
+		`ALTER TABLE objects ADD COLUMN IF NOT EXISTS height integer NOT NULL DEFAULT 0`,
+		`ALTER TABLE objects ADD COLUMN IF NOT EXISTS thumbnail_key text NOT NULL DEFAULT ''`,
 		`CREATE TABLE IF NOT EXISTS aliases (
 			slug text PRIMARY KEY,
 			object_sha256 text REFERENCES objects(sha256),
@@ -226,7 +236,7 @@ func (s *PostgresMetadataStore) runMigrations(ctx context.Context) error {
 func (s *PostgresMetadataStore) GetObject(ctx context.Context, sha256 string) (StoredObject, bool, error) {
 	var object StoredObject
 	var deleted sql.NullTime
-	err := s.db.QueryRowContext(ctx, `SELECT sha256, object_key, size_bytes, content_type, extension, first_filename, uploader_subject, status, created_at, deleted_at FROM objects WHERE sha256 = $1`, sha256).Scan(
+	err := s.db.QueryRowContext(ctx, `SELECT sha256, object_key, size_bytes, content_type, extension, first_filename, uploader_subject, status, width, height, thumbnail_key, created_at, deleted_at FROM objects WHERE sha256 = $1`, sha256).Scan(
 		&object.SHA256,
 		&object.ObjectKey,
 		&object.Size,
@@ -235,6 +245,9 @@ func (s *PostgresMetadataStore) GetObject(ctx context.Context, sha256 string) (S
 		&object.FirstFilename,
 		&object.Uploader,
 		&object.Status,
+		&object.Width,
+		&object.Height,
+		&object.ThumbnailKey,
 		&object.CreatedAt,
 		&deleted,
 	)
@@ -254,7 +267,7 @@ func (s *PostgresMetadataStore) GetDerivedObject(ctx context.Context, sourceSHA2
 	var object StoredObject
 	var deleted sql.NullTime
 	err := s.db.QueryRowContext(ctx, `SELECT
-			o.sha256, o.object_key, o.size_bytes, o.content_type, o.extension, o.first_filename, o.uploader_subject, o.status, o.created_at, o.deleted_at
+			o.sha256, o.object_key, o.size_bytes, o.content_type, o.extension, o.first_filename, o.uploader_subject, o.status, o.width, o.height, o.thumbnail_key, o.created_at, o.deleted_at
 		FROM object_derivatives d
 		JOIN objects o ON o.sha256 = d.target_object_sha256
 		WHERE d.source_object_sha256 = $1
@@ -268,6 +281,9 @@ func (s *PostgresMetadataStore) GetDerivedObject(ctx context.Context, sourceSHA2
 		&object.FirstFilename,
 		&object.Uploader,
 		&object.Status,
+		&object.Width,
+		&object.Height,
+		&object.ThumbnailKey,
 		&object.CreatedAt,
 		&deleted,
 	)
@@ -422,6 +438,7 @@ func (s *PostgresMetadataStore) DeleteAlias(ctx context.Context, slug, owner str
 				return DeletedShare{}, false, err
 			}
 			deleted.ObjectKey = alias.ObjectKey
+			deleted.ThumbnailKey = alias.ThumbnailKey
 		}
 	}
 	return deleted, true, tx.Commit()
@@ -596,8 +613,8 @@ func upsertObjectTx(ctx context.Context, tx *sql.Tx, object StoredObject) error 
 	if object.Status == "" {
 		object.Status = "ready"
 	}
-	_, err := tx.ExecContext(ctx, `INSERT INTO objects (sha256, object_key, size_bytes, content_type, extension, first_filename, uploader_subject, status, deleted_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL)
+	_, err := tx.ExecContext(ctx, `INSERT INTO objects (sha256, object_key, size_bytes, content_type, extension, first_filename, uploader_subject, status, width, height, thumbnail_key, deleted_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NULL)
 		ON CONFLICT (sha256) DO UPDATE SET
 			object_key = EXCLUDED.object_key,
 			size_bytes = EXCLUDED.size_bytes,
@@ -605,6 +622,9 @@ func upsertObjectTx(ctx context.Context, tx *sql.Tx, object StoredObject) error 
 			extension = EXCLUDED.extension,
 			first_filename = EXCLUDED.first_filename,
 			status = EXCLUDED.status,
+			width = EXCLUDED.width,
+			height = EXCLUDED.height,
+			thumbnail_key = EXCLUDED.thumbnail_key,
 			deleted_at = NULL`,
 		object.SHA256,
 		object.ObjectKey,
@@ -614,6 +634,9 @@ func upsertObjectTx(ctx context.Context, tx *sql.Tx, object StoredObject) error 
 		object.FirstFilename,
 		object.Uploader,
 		object.Status,
+		object.Width,
+		object.Height,
+		object.ThumbnailKey,
 	)
 	return err
 }
@@ -731,7 +754,8 @@ func aliasSelect() string {
 	return `SELECT
 			a.slug, COALESCE(a.object_sha256, ''), COALESCE(o.object_key, ''), a.owner_subject, a.display_filename, a.visibility,
 			a.status, a.error, a.created_at, a.updated_at, a.redirect_count, a.last_redirected_at,
-			COALESCE(o.size_bytes, 0), COALESCE(o.content_type, '')
+			COALESCE(o.size_bytes, 0), COALESCE(o.content_type, ''),
+			COALESCE(o.width, 0), COALESCE(o.height, 0), COALESCE(o.thumbnail_key, '')
 		FROM aliases a
 		LEFT JOIN objects o ON o.sha256 = a.object_sha256`
 }
@@ -757,6 +781,9 @@ func scanAlias(row scanner, alias *ShareAlias) error {
 		&last,
 		&alias.Size,
 		&alias.ContentType,
+		&alias.Width,
+		&alias.Height,
+		&alias.ThumbnailKey,
 	); err != nil {
 		return err
 	}
