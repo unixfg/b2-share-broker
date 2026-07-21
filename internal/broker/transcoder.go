@@ -81,9 +81,13 @@ func (r FFmpegMediaProcessor) VideoDimensions(ctx context.Context, inputPath str
 	if err != nil {
 		return 0, 0, fmt.Errorf("ffprobe dimensions failed: %w", err)
 	}
-	fields := strings.Split(strings.TrimSpace(string(output)), ",")
-	if len(fields) != 2 {
-		return 0, 0, fmt.Errorf("unexpected ffprobe dimensions output %q", strings.TrimSpace(string(output)))
+	return parseVideoDimensions(string(output))
+}
+
+func parseVideoDimensions(output string) (int, int, error) {
+	fields := strings.Split(strings.TrimSpace(output), ",")
+	if len(fields) < 2 {
+		return 0, 0, fmt.Errorf("unexpected ffprobe dimensions output %q", strings.TrimSpace(output))
 	}
 	width, err := strconv.Atoi(fields[0])
 	if err != nil {
@@ -105,7 +109,7 @@ func (r FFmpegMediaProcessor) ExtractThumbnail(ctx context.Context, inputPath, o
 			"-ss", seek,
 			"-i", inputPath,
 			"-frames:v", "1",
-			"-vf", "scale=min(1280,iw):-2",
+			"-vf", "scale='min(1280,iw)':-2",
 			"-q:v", "4",
 			outputPath,
 		)
