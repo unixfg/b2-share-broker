@@ -1,0 +1,19 @@
+{{- if and .Values.processor.enabled .Values.processor.staging.size -}}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Chart.Name }}-staging
+  namespace: {{ include "b2-share-broker.namespace" . }}
+  labels:
+    {{- include "b2-share-broker.labels" . | nindent 4 }}
+    app.kubernetes.io/component: processor
+spec:
+  accessModes:
+    - {{ .Values.processor.staging.accessMode }}
+  {{- with .Values.processor.staging.storageClassName }}
+  storageClassName: {{ . }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.processor.staging.size }}
+{{- end -}}

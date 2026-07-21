@@ -1,0 +1,59 @@
+{{- if .Values.cnpg.enabled -}}
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: {{ .Chart.Name }}-pg
+  namespace: {{ include "b2-share-broker.namespace" . }}
+  labels:
+    {{- include "b2-share-broker.labels" . | nindent 4 }}
+spec:
+  description: {{ .Values.cnpg.description | quote }}
+  instances: {{ .Values.cnpg.instances }}
+  enablePDB: false
+  failoverDelay: 10
+  switchoverDelay: 30
+  inheritedMetadata:
+    labels:
+      {{- include "b2-share-broker.labels" . | nindent 6 }}
+  affinity:
+    enablePodAntiAffinity: true
+    podAntiAffinityType: required
+    topologyKey: kubernetes.io/hostname
+  storage:
+    size: {{ .Values.cnpg.storage.size }}
+    {{- with .Values.cnpg.storage.storageClassName }}
+    storageClass: {{ . }}
+    {{- end }}
+  enableSuperuserAccess: true
+  bootstrap:
+    initdb:
+      database: b2_share_broker
+      owner: b2_share_broker
+      secret:
+        name: {{ .Values.cnpg.credentials.existingSecret }}
+  monitoring:
+    enablePodMonitor: true
+  postgresql:
+    parameters:
+      max_connections: "100"
+  resources:
+    {{- toYaml .Values.cnpg.resources | nindent 12 }}
+  backup:
+    retentionPolicy: {{ .Values.cnpg.backup.retentionPolicy | quote }}
+    barmanObjectStore:
+      destinationPath: {{ .Values.cnpg.backup.destinationPath | quote }}
+      endpointURL: {{ .Values.cnpg.backup.endpointURL | quote }}
+      s3Credentials:
+        accessKeyId:
+          name: {{ .Values.cnpg.backupCredentials.existingSecret }}
+          key: ACCESS_KEY_ID
+        secretAccessKey:
+          name: {{ .Values.cnpg.backupCredentials.existingSecret }}
+          key: ACCESS_SECRET_KEY
+      data:
+        compression: gzip
+        encryption: AES256
+      wal:
+        compression: gzip
+        encryption: AES256
+{{- end -}}

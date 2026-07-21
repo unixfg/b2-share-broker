@@ -1,7 +1,0 @@
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: b2-share-broker
-  labels:
-    app.kubernetes.io/name: b2-share-broker
-    app.kubernetes.io/part-of: sharing

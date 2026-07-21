@@ -1,0 +1,16 @@
+{{- if and .Values.cnpg.enabled .Values.cnpg.scheduledBackup.enabled -}}
+apiVersion: postgresql.cnpg.io/v1
+kind: ScheduledBackup
+metadata:
+  name: {{ .Chart.Name }}-pg-daily-backup
+  namespace: {{ include "b2-share-broker.namespace" . }}
+  labels:
+    {{- include "b2-share-broker.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.cnpg.scheduledBackup.schedule | quote }}
+  backupOwnerReference: self
+  cluster:
+    name: {{ .Chart.Name }}-pg
+  method: barmanObjectStore
+  target: prefer-standby
+{{- end -}}
