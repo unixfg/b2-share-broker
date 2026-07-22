@@ -42,7 +42,7 @@ services:
 
   processor:
     image: ghcr.io/unixfg/b2-share-broker:main
-    command: ["/usr/local/bin/b2-share-processor"]
+    entrypoint: ["/usr/local/bin/b2-share-processor"]
     env_file: .env
     depends_on:
       postgres:

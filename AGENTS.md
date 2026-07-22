@@ -155,5 +155,5 @@ kubectl exec -n b2-share-broker <processor-pod> -- sh -c '...'
 - Update `README.md` whenever behavior, endpoints, or data model change.
 - Update this `AGENTS.md` when workflows, pipelines, or operational knowledge
   change.
-- Significant multi-PR efforts get a work log under `docs/` (see
-  `docs/WORKLOG-2026-07-21-MEDIA-PIPELINE.md`).
+- Significant multi-PR efforts get a work log under `docs/worklogs/` (see
+  `docs/worklogs/WORKLOG-2026-07-21-MEDIA-PIPELINE.md`).
