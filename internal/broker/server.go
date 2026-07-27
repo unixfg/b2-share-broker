@@ -131,9 +131,9 @@ func (s *Server) handlePublicShare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if alias.RedirectToSlug != "" {
-		location := ShareURL(s.cfg.PublicBaseURL, alias.RedirectToSlug)
+		location := SharePageURL(s.cfg.PublicBaseURL, alias.RedirectToSlug)
 		if variant != "" {
-			location += "/" + variant
+			location = ShareURL(s.cfg.PublicBaseURL, alias.RedirectToSlug) + "/" + variant
 		}
 		if r.URL.RawQuery != "" {
 			location += "?" + r.URL.RawQuery
@@ -353,7 +353,7 @@ func (s *Server) handleCreateUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusAccepted, createUploadResponse{
-		ShareURL: ShareURL(s.cfg.PublicBaseURL, slug),
+		ShareURL: SharePageURL(s.cfg.PublicBaseURL, slug),
 		Slug:     slug,
 		JobID:    created.ID,
 		Status:   created.Status,
@@ -507,7 +507,7 @@ func (s *Server) handleShare(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) populateShareURLs(alias *ShareAlias) {
-	alias.PublicURL = ShareURL(s.cfg.PublicBaseURL, alias.Slug)
+	alias.PublicURL = SharePageURL(s.cfg.PublicBaseURL, alias.Slug)
 	if alias.ObjectKey != "" {
 		alias.B2URL = PublicURL(s.cfg.B2PublicBaseURL, alias.ObjectKey)
 	}
@@ -735,6 +735,9 @@ func sharePathFromPath(escapedPath string) (string, string, bool) {
 		return "", "", false
 	}
 	rest := strings.TrimPrefix(escapedPath, "/s/")
+	if strings.HasSuffix(rest, "/") && strings.Count(rest, "/") == 1 {
+		rest = strings.TrimSuffix(rest, "/")
+	}
 	variant := ""
 	if index := strings.LastIndex(rest, "/"); index >= 0 {
 		if suffix := rest[index+1:]; suffix == "media" || suffix == "thumbnail" {
@@ -832,8 +835,8 @@ func isUnfurlAgent(userAgent string) bool {
 }
 
 func (s *Server) writeShareUnfurlPage(w http.ResponseWriter, r *http.Request, alias ShareAlias) {
-	shareURL := ShareURL(s.cfg.PublicBaseURL, alias.Slug)
-	mediaURL := shareURL + "/media"
+	shareURL := SharePageURL(s.cfg.PublicBaseURL, alias.Slug)
+	mediaURL := ShareURL(s.cfg.PublicBaseURL, alias.Slug) + "/media"
 
 	var tags strings.Builder
 	writeProperty := func(property, content string) {
@@ -872,7 +875,7 @@ func (s *Server) writeShareUnfurlPage(w http.ResponseWriter, r *http.Request, al
 			writeProperty("og:video:height", strconv.Itoa(alias.Height))
 		}
 		if alias.ThumbnailKey != "" {
-			imageURL = shareURL + "/thumbnail"
+			imageURL = ShareURL(s.cfg.PublicBaseURL, alias.Slug) + "/thumbnail"
 		}
 	case strings.HasPrefix(alias.ContentType, "image/"):
 		writeProperty("og:type", "website")
@@ -957,7 +960,7 @@ func uploadStatusResponseFromJob(cfg Config, job ProcessingJob) uploadStatusResp
 		Status:          job.Status,
 		Profile:         job.Profile,
 		Slug:            job.AliasSlug,
-		ShareURL:        ShareURL(cfg.PublicBaseURL, job.AliasSlug),
+		ShareURL:        SharePageURL(cfg.PublicBaseURL, job.AliasSlug),
 		TargetSHA256:    job.TargetSHA256,
 		TargetObjectKey: job.TargetObjectKey,
 		Error:           job.Error,

@@ -156,7 +156,7 @@ or thumbnails.
 Check a normal redirect:
 
 ```bash
-curl -I https://share.example.com/s/example.mp4
+curl -I https://share.example.com/s/example.mp4/
 ```
 
 Check the Open Graph page as Discord sees it:
@@ -165,6 +165,16 @@ Check the Open Graph page as Discord sees it:
 curl \
   -A 'Mozilla/5.0 (compatible; Discordbot/2.0; +https://discordapp.com)' \
   https://share.example.com/s/example.mp4
+```
+
+Check the Open Graph page as Bluesky sees it. Use the trailing-slash permalink;
+without it, the Bluesky composer classifies `.mp4` as direct media and skips
+link-card extraction:
+
+```bash
+curl \
+  -A 'Mozilla/5.0 (compatible; Bluesky Cardyb/1.1; +mailto:support@bsky.app)' \
+  https://share.example.com/s/example.mp4/
 ```
 
 The unfurl document should point media at `/s/{slug}/media` and, when present,

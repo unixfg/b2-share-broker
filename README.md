@@ -25,7 +25,7 @@ API supports the same upload, history, rename, and delete workflow with OIDC
 bearer tokens.
 
 > [!IMPORTANT]
-> Share links are unlisted, not private. Anyone with a `/s/{slug}` URL can open
+> Share links are unlisted, not private. Anyone with a `/s/{slug}/` URL can open
 > it without authentication.
 
 ## Why B2 Share?
@@ -36,7 +36,9 @@ bearer tokens.
 - **Web-friendly video** remuxes compatible media or normalizes it to H.264/AAC
   MP4 with NVIDIA NVENC.
 - **Rich link previews** provide Open Graph video, image, dimensions, and
-  thumbnail metadata for common chat crawlers.
+  thumbnail metadata for common chat and social crawlers. Returned share URLs
+  use a trailing slash so clients such as Bluesky do not mistake the permalink
+  for a direct media URL and skip Open Graph extraction.
 - **Content deduplication** reuses both identical stored objects and previously
   processed derivatives.
 - **OIDC access control** supports browser sessions and bearer-token clients.

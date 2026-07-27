@@ -131,6 +131,11 @@ These cost real debugging time — do not relearn them the hard way:
   `/s/{slug}/thumbnail` 302s without counting (would double-count unfurls).
   Counts are "link clicks + embed proxy fetches", never literal plays —
   Discord serves repeats from its own CDN.
+- **Bluesky classifies links by pathname extension before crawling.** Its
+  composer skips Open Graph extraction for a permalink ending in `.mp4`.
+  User-facing share URLs therefore use `/s/{slug}/`; the trailing slash makes
+  Cardyb fetch the OG page while `/s/{slug}` remains backward-compatible.
+  Cardyb is a server-side fetcher, so Bluesky domains do not need CORS access.
 
 ## Live verification recipes
 

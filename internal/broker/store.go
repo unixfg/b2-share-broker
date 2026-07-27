@@ -150,3 +150,10 @@ func PublicURL(baseURL, objectKey string) string {
 func ShareURL(baseURL, objectKey string) string {
 	return PublicURL(baseURL, "s/"+strings.Trim(objectKey, "/"))
 }
+
+// SharePageURL returns the user-facing permalink. The trailing slash prevents
+// clients such as Bluesky from classifying a share by its filename extension
+// and skipping Open Graph extraction.
+func SharePageURL(baseURL, objectKey string) string {
+	return ShareURL(baseURL, objectKey) + "/"
+}

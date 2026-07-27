@@ -515,7 +515,7 @@ func TestCreateUploadStagesMultipartAndQueuesShare(t *testing.T) {
 	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
 		t.Fatal(err)
 	}
-	if response.ShareURL != "https://share.doesthings.online/s/"+response.Slug ||
+	if response.ShareURL != "https://share.doesthings.online/s/"+response.Slug+"/" ||
 		!strings.HasPrefix(response.Slug, "screenshot_1-") ||
 		!strings.HasSuffix(response.Slug, ".png") {
 		t.Fatalf("response = %#v", response)
@@ -811,7 +811,7 @@ func TestPublicShareServesUnfurlPageToCrawlers(t *testing.T) {
 	for _, want := range []string{
 		`property="og:title" content="Launch Clip.mp4"`,
 		`property="og:type" content="video.other"`,
-		`property="og:url" content="https://share.doesthings.online/s/ready.mp4"`,
+		`property="og:url" content="https://share.doesthings.online/s/ready.mp4/"`,
 		`property="og:site_name" content="share.doesthings.online"`,
 		`property="og:video" content="` + ogMediaURL + `"`,
 		`property="og:video:secure_url" content="` + ogMediaURL + `"`,
@@ -835,6 +835,55 @@ func TestPublicShareServesUnfurlPageToCrawlers(t *testing.T) {
 	server.ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusFound || recorder.Header().Get("Location") != b2MediaURL {
 		t.Fatalf("browser status = %d, location = %q", recorder.Code, recorder.Header().Get("Location"))
+	}
+}
+
+func TestPublicShareTrailingSlashSupportsBlueskyCardPreview(t *testing.T) {
+	cfg := testConfig(t)
+	metadata := newMemoryMetadata()
+	key := "01/" + testSHA256 + ".mp4"
+	thumbnailKey := "01/" + testSHA256 + ".jpg"
+	metadata.aliases["ready.mp4"] = ShareAlias{
+		Slug:            "ready.mp4",
+		ObjectSHA256:    testSHA256,
+		ObjectKey:       key,
+		Owner:           "user-1",
+		DisplayFilename: "Launch Clip.mp4",
+		Visibility:      "public",
+		Status:          AliasStatusReady,
+		ContentType:     "video/mp4",
+		ThumbnailKey:    thumbnailKey,
+	}
+	server := NewServer(cfg, fakeAuth{err: ErrUnauthorized}, &fakeStore{}, metadata, slog.Default())
+
+	request := httptest.NewRequest(http.MethodGet, "/s/ready.mp4/", nil)
+	request.Header.Set("User-Agent", "Mozilla/5.0 (compatible; Bluesky Cardyb/1.1; +mailto:support@bsky.app)")
+	recorder := httptest.NewRecorder()
+	server.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	body := recorder.Body.String()
+	for _, want := range []string{
+		`property="og:title" content="Launch Clip.mp4"`,
+		`property="og:url" content="https://share.doesthings.online/s/ready.mp4/"`,
+		`property="og:image" content="https://share.doesthings.online/s/ready.mp4/thumbnail"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("body missing %q:\n%s", want, body)
+		}
+	}
+	if metadata.aliases["ready.mp4"].RedirectCount != 0 {
+		t.Fatalf("Bluesky card fetch counted as redirect: %d", metadata.aliases["ready.mp4"].RedirectCount)
+	}
+
+	request = httptest.NewRequest(http.MethodGet, "/s/ready.mp4/", nil)
+	request.Header.Set("User-Agent", "Mozilla/5.0")
+	recorder = httptest.NewRecorder()
+	server.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusFound {
+		t.Fatalf("browser status = %d, body = %s", recorder.Code, recorder.Body.String())
 	}
 }
 
@@ -994,7 +1043,7 @@ func TestListSharesReturnsPendingAndReadyHistory(t *testing.T) {
 		t.Fatalf("response = %#v", response)
 	}
 	for _, share := range response.Shares {
-		if share.PublicURL != "https://share.doesthings.online/s/"+share.Slug {
+		if share.PublicURL != "https://share.doesthings.online/s/"+share.Slug+"/" {
 			t.Fatalf("share = %#v", share)
 		}
 		if share.Slug == "ready.txt" && share.B2URL != "https://bucket.s3.us-west-004.backblazeb2.com/"+key {
@@ -1078,7 +1127,7 @@ func TestRenameShareUpdatesDisplayNameAndPermanentlyRedirectsOldName(t *testing.
 	if err := json.Unmarshal(recorder.Body.Bytes(), &renamed); err != nil {
 		t.Fatal(err)
 	}
-	if renamed.Slug != "tiddies.mp4" || renamed.DisplayFilename != "tiddies.mp4" || renamed.PublicURL != "https://share.doesthings.online/s/tiddies.mp4" {
+	if renamed.Slug != "tiddies.mp4" || renamed.DisplayFilename != "tiddies.mp4" || renamed.PublicURL != "https://share.doesthings.online/s/tiddies.mp4/" {
 		t.Fatalf("renamed = %#v", renamed)
 	}
 	old := metadata.aliases["img_8388-562377a03a739138.mp4"]

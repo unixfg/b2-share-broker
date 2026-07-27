@@ -203,6 +203,9 @@ Ready share links normally count an open and redirect directly to B2. Known
 crawler user agents instead receive an Open Graph document that points at
 stable `/media` and `/thumbnail` routes.
 
+- User-facing permalinks end in `/`. This keeps filename extensions in the
+  slug while ensuring Bluesky considers the URL eligible for Open Graph
+  extraction. The form without a trailing slash remains supported.
 - Crawler retrieval of the Open Graph page is not counted.
 - `/media` is counted because it represents an embed proxy fetching content.
 - `/thumbnail` is not counted to avoid double-counting the same unfurl.

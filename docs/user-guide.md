@@ -95,8 +95,11 @@ derivatives can share one stored object.
 
 ## Public Links and Previews
 
-Normal requests to a ready `/s/{slug}` URL receive a `302` redirect to the
+Normal requests to a ready `/s/{slug}/` URL receive a `302` redirect to the
 native public B2 URL. Application pods do not proxy the downloaded bytes.
+Generated and copied permalinks include the trailing slash so Bluesky treats
+names ending in `.mp4` or another media extension as pages eligible for link
+card extraction. Existing `/s/{slug}` links without the slash remain valid.
 
 Known unfurl crawlers receive a short-lived Open Graph page instead. Video
 previews can include a player, dimensions, and an extracted JPEG thumbnail;

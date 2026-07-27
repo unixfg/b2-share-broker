@@ -120,7 +120,7 @@ The response is `202 Accepted` because processing is asynchronous:
 
 ```json
 {
-  "shareUrl": "https://share.example.com/s/launch-demo.mp4",
+  "shareUrl": "https://share.example.com/s/launch-demo.mp4/",
   "slug": "launch-demo.mp4",
   "jobId": "9f4e04ba-4a59-4d5b-aa08-74827eea7469",
   "status": "queued"
@@ -164,7 +164,7 @@ curl --fail-with-body \
   "status": "completed",
   "profile": "mp4-web",
   "slug": "launch-demo.mp4",
-  "shareUrl": "https://share.example.com/s/launch-demo.mp4",
+  "shareUrl": "https://share.example.com/s/launch-demo.mp4/",
   "targetSha256": "9d2bb548dd140297cfdc2d1ab1d437b9e8604401279b6bcda1790700ee5f8827",
   "targetObjectKey": "9d/9d2bb548dd140297cfdc2d1ab1d437b9e8604401279b6bcda1790700ee5f8827.mp4"
 }
@@ -217,7 +217,7 @@ curl --fail-with-body \
       "height": 1080,
       "thumbnailKey": "9d/9d2bb548dd140297cfdc2d1ab1d437b9e8604401279b6bcda1790700ee5f8827.jpg",
       "b2Url": "https://f000.backblazeb2.com/file/example/9d/example.mp4",
-      "publicUrl": "https://share.example.com/s/launch-demo.mp4"
+      "publicUrl": "https://share.example.com/s/launch-demo.mp4/"
     }
   ]
 }
@@ -262,9 +262,13 @@ deleted only when no other active current alias references them.
 
 ## Public Shares
 
-### `GET /s/{slug}`
+### `GET /s/{slug}` or `GET /s/{slug}/`
 
 This endpoint is unauthenticated.
+
+API responses use the trailing-slash form. Both forms resolve the same share;
+the slash prevents clients such as Bluesky from classifying the permalink as
+direct media based on its filename extension and skipping Open Graph extraction.
 
 | Share condition | Response |
 |---|---|
