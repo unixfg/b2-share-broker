@@ -88,6 +88,45 @@ pdb:
   enabled: true
   minAvailable: 1
 
+# Optional ingress isolation for the broker, processor, and CloudNativePG pods.
+# Review and override the trusted source selectors for your cluster before
+# enabling this feature.
+networkPolicy:
+  enabled: false
+  trustedSources:
+    traefik:
+      namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: ingress-system
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: traefik
+          app.kubernetes.io/instance: traefik-ingress-system
+    gatus:
+      namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: gatus
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: gatus
+          app.kubernetes.io/instance: gatus
+    cnpgOperator:
+      namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: cnpg-system
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: cloudnative-pg
+          app.kubernetes.io/instance: cnpg-operator
+    prometheus:
+      namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: monitoring
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: prometheus
+          app.kubernetes.io/instance: kube-prometheus-stack-prometheus
+
 cnpg:
   enabled: true
   instances: 3

@@ -1,0 +1,35 @@
+networkPolicy:
+  enabled: true
+  trustedSources:
+    traefik:
+      namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: test-ingress
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: test-traefik
+          app.kubernetes.io/instance: test-traefik-release
+    gatus:
+      namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: test-gatus
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: test-gatus
+          app.kubernetes.io/instance: test-gatus-release
+    cnpgOperator:
+      namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: test-cnpg-system
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: test-cloudnative-pg
+          app.kubernetes.io/instance: test-cnpg-operator
+    prometheus:
+      namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: test-monitoring
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: test-prometheus
+          app.kubernetes.io/instance: test-prometheus-release

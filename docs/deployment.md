@@ -118,6 +118,7 @@ The OCI chart deploys:
 - broker and processor ClusterIP Services;
 - a broker PodDisruptionBudget and topology spread;
 - an optional standard Kubernetes Ingress;
+- optional ingress-only NetworkPolicies;
 - an optional three-instance CloudNativePG cluster and scheduled backup.
 
 ### Namespace and Secrets
@@ -188,11 +189,11 @@ as needed. The chart upload limit is 2 GiB and the processor allows two-hour
 HTTP reads and writes, but an ingress controller can reject or time out the
 request earlier.
 
-Install chart version `0.1.2`:
+Install chart version `0.1.3`:
 
 ```bash
 helm install b2-share-broker oci://ghcr.io/unixfg/b2-share-broker \
-  --version 0.1.2 \
+  --version 0.1.3 \
   --namespace b2-share-broker \
   -f values.yaml
 ```
@@ -203,6 +204,25 @@ Namespace and provision Secrets through a controller that can create them
 after installation.
 
 See the [chart reference](../chart/README.md) for every value.
+
+### Network Policies
+
+NetworkPolicies are disabled by default for upgrade compatibility. Set
+`networkPolicy.enabled: true` to isolate ingress to the API, processor, and
+chart-managed CloudNativePG instance pods. The enabled policies permit only:
+
+- Traefik and Gatus to reach the API on TCP 8080;
+- Traefik to reach the processor on TCP 8080;
+- same-release application pods and same-cluster CNPG workloads to reach
+  PostgreSQL on TCP 5432;
+- the CloudNativePG operator to reach database pods on TCP 8000 and 5432; and
+- Prometheus to scrape CNPG metrics on TCP 9187.
+
+The trusted sources use both namespace and pod LabelSelectors. The defaults
+match the reference deployment's release labels; override the selector maps
+under `networkPolicy.trustedSources` when your namespace names or Helm release
+labels differ. Confirm the rendered selectors against running pod labels before
+enabling the policies. Egress remains unselected.
 
 ## CloudNativePG
 
@@ -285,6 +305,7 @@ volume.
 - Configure ingress body size and upload timeouts.
 - Configure and test PostgreSQL backups and restoration.
 - Choose storage classes for staging and CNPG.
+- Review trusted source labels and enable NetworkPolicies where supported.
 - Verify NVENC inside the processor pod when full video support is expected.
 - Monitor queue state, staging capacity, and B2 storage versions.
 

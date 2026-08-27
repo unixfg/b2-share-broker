@@ -11,7 +11,7 @@
 <p align="center">
   <a href="https://github.com/unixfg/b2-share-broker/actions/workflows/ci.yaml"><img src="https://github.com/unixfg/b2-share-broker/actions/workflows/ci.yaml/badge.svg" alt="CI status"></a>
   <a href="https://github.com/unixfg/b2-share-broker/pkgs/container/b2-share-broker"><img src="https://img.shields.io/badge/container-ghcr.io-2496ED?logo=docker&logoColor=white" alt="Container image"></a>
-  <a href="https://github.com/unixfg/b2-share-broker/tree/main/chart"><img src="https://img.shields.io/badge/Helm-0.1.2-0F1689?logo=helm&logoColor=white" alt="Helm chart 0.1.2"></a>
+  <a href="https://github.com/unixfg/b2-share-broker/tree/main/chart"><img src="https://img.shields.io/badge/Helm-0.1.3-0F1689?logo=helm&logoColor=white" alt="Helm chart 0.1.3"></a>
   <img src="https://img.shields.io/badge/Go-1.25-00ADD8?logo=go&logoColor=white" alt="Go 1.25">
 </p>
 
@@ -102,7 +102,7 @@ CloudNativePG cluster.
 
 ```bash
 helm install b2-share-broker oci://ghcr.io/unixfg/b2-share-broker \
-  --version 0.1.2 \
+  --version 0.1.3 \
   --namespace b2-share-broker \
   --set namespace.create=false \
   -f values.yaml
@@ -112,6 +112,10 @@ The default values are deployment scaffolding, not a ready-to-run production
 configuration. Create the namespace and required secrets first, then set your
 public URL, OIDC issuer, storage classes, B2 backup destination, and ingress
 before installing.
+
+Ingress-only NetworkPolicies for the API, processor, and CloudNativePG pods
+are available but disabled by default. Review the trusted namespace and pod
+selectors for your cluster before enabling them.
 
 See the [chart reference](chart/README.md) for all values.
 

@@ -37,7 +37,8 @@ Three binaries are built from one Go module and shipped in one image
   "Hard-won facts" below).
 - `chart/`: Helm chart published as an OCI artifact to
   `ghcr.io/unixfg/b2-share-broker`. Deployment manifests for the broker,
-  processor, CNPG cluster, PDBs, staging PVC, and optional Ingress.
+  processor, CNPG cluster, PDBs, staging PVC, optional Ingress, and opt-in
+  ingress-only NetworkPolicies.
 - `docker-compose.yaml`: local dev stack (broker + processor + postgres
   behind traefik). Mirrors production routing.
 
@@ -65,9 +66,9 @@ Notes:
 
 ## CI/CD and deployment
 
-1. PR into `main` (squash merge). CI runs tests, `helm lint chart/`, and
-   `helm template chart/`; image and chart builds only run on `main` pushes
-   and publish:
+1. PR into `main` (squash merge). CI runs tests, lints the chart with
+   NetworkPolicies disabled and enabled, and exercises the chart render test
+   matrix; image and chart builds only run on `main` pushes and publish:
    - `ghcr.io/unixfg/b2-share-broker:main` and `:sha-<commit>` (OCI image)
    - `ghcr.io/unixfg/b2-share-broker:<chart-version>` (OCI Helm chart artifact)
 2. Deployment lives in `github.com/unixfg/gitops` under `apps/b2-share-broker`

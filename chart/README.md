@@ -16,6 +16,7 @@ behavior.
 - An external OIDC provider and confidential client.
 - CloudNativePG installed when `cnpg.enabled` is `true`.
 - An NVIDIA runtime and GPU resource when processor GPU support is enabled.
+- A NetworkPolicy-capable CNI when `networkPolicy.enabled` is `true`.
 
 ## Install
 
@@ -25,7 +26,7 @@ set `namespace.create: false` in that file.
 
 ```bash
 helm install b2-share-broker oci://ghcr.io/unixfg/b2-share-broker \
-  --version 0.1.2 \
+  --version 0.1.3 \
   --namespace b2-share-broker \
   -f values.yaml
 ```
@@ -81,6 +82,27 @@ When enabled, the built-in Ingress routes:
 Set controller-specific request-body and timeout annotations for large uploads.
 The processor allows long-running upload requests, but ingress defaults can be
 much lower.
+
+## Network Policies
+
+`networkPolicy.enabled` is `false` by default so upgrading the chart does not
+change network reachability. When enabled, the chart renders ingress-only
+policies with these boundaries:
+
+| Target | Allowed ingress |
+|---|---|
+| Same-release API pods | Trusted Traefik and Gatus pods on TCP 8080 |
+| Same-release processor pods | Trusted Traefik pods on TCP 8080 |
+| `b2-share-broker-pg` CNPG instances | Same-release API and processor pods plus same-cluster CNPG workloads on TCP 5432; trusted CNPG operator pods on TCP 8000 and 5432; trusted Prometheus pods on TCP 9187 |
+
+The processor and database policies render only when their corresponding
+components are enabled. These policies do not select egress traffic.
+
+Every external source combines a namespace selector with a pod selector. The
+defaults match the reference deployment's exact Traefik, Gatus, CloudNativePG
+operator, and Prometheus release labels. Override the full LabelSelector maps
+under `networkPolicy.trustedSources` if your namespaces or release labels are
+different, and confirm those labels before enabling the policies.
 
 ## GPU
 
@@ -148,6 +170,15 @@ H.264/AAC videos that can be remuxed still work.
 | `secrets.existingSecret` | string | `b2-share-broker-secrets` | Application Secret name |
 | `pdb.enabled` | bool | `true` | Create broker PDB |
 | `pdb.minAvailable` | int | `1` | Minimum available brokers |
+| `networkPolicy.enabled` | bool | `false` | Create ingress-only NetworkPolicies |
+| `networkPolicy.trustedSources.traefik.namespaceSelector` | object | See `values.yaml` | Trusted Traefik namespace LabelSelector |
+| `networkPolicy.trustedSources.traefik.podSelector` | object | See `values.yaml` | Trusted Traefik pod LabelSelector |
+| `networkPolicy.trustedSources.gatus.namespaceSelector` | object | See `values.yaml` | Trusted Gatus namespace LabelSelector |
+| `networkPolicy.trustedSources.gatus.podSelector` | object | See `values.yaml` | Trusted Gatus pod LabelSelector |
+| `networkPolicy.trustedSources.cnpgOperator.namespaceSelector` | object | See `values.yaml` | Trusted CNPG operator namespace LabelSelector |
+| `networkPolicy.trustedSources.cnpgOperator.podSelector` | object | See `values.yaml` | Trusted CNPG operator pod LabelSelector |
+| `networkPolicy.trustedSources.prometheus.namespaceSelector` | object | See `values.yaml` | Trusted Prometheus namespace LabelSelector |
+| `networkPolicy.trustedSources.prometheus.podSelector` | object | See `values.yaml` | Trusted Prometheus pod LabelSelector |
 | `cnpg.enabled` | bool | `true` | Deploy CloudNativePG resources |
 | `cnpg.instances` | int | `3` | PostgreSQL instance count |
 | `cnpg.description` | string | See `values.yaml` | Cluster description |
@@ -180,5 +211,6 @@ and volume-mount templates are changed.
 - Set storage classes explicitly when the cluster has no suitable defaults.
 - Configure both CNPG backup destination fields before relying on backups.
 - Keep one processor replica with the default RWO staging topology.
+- Review trusted source labels before enabling NetworkPolicies.
 - Verify B2 versions after testing deletion.
 - Validate NVENC from inside the processor pod.
