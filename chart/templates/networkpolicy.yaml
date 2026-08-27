@@ -90,9 +90,7 @@ spec:
         {{- end }}
         - podSelector:
             matchLabels:
-              app.kubernetes.io/instance: {{ .Release.Name }}
               cnpg.io/cluster: {{ .Chart.Name }}-pg
-              cnpg.io/podRole: instance
       ports:
         - port: 5432
           protocol: TCP

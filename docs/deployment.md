@@ -213,7 +213,8 @@ chart-managed CloudNativePG instance pods. The enabled policies permit only:
 
 - Traefik and Gatus to reach the API on TCP 8080;
 - Traefik to reach the processor on TCP 8080;
-- same-release application and CNPG peers to reach PostgreSQL on TCP 5432;
+- same-release application pods and same-cluster CNPG workloads to reach
+  PostgreSQL on TCP 5432;
 - the CloudNativePG operator to reach database pods on TCP 8000 and 5432; and
 - Prometheus to scrape CNPG metrics on TCP 9187.
 

@@ -43,6 +43,43 @@ assert_absent() {
   fi
 }
 
+assert_occurrence_count() {
+  local manifest="$1"
+  local expected="$2"
+  local count="$3"
+  local actual
+  actual="$(grep -Fc -- "${expected}" "${manifest}" || true)"
+  [[ "${actual}" == "${count}" ]] ||
+    fail "expected '${expected}' ${count} times in ${manifest}, found ${actual}"
+}
+
+assert_cluster_only_cnpg_peer() {
+  local manifest="$1"
+  local cluster="$2"
+  awk -v cluster="${cluster}" '
+    $0 == "        - podSelector:" {
+      capture = 1
+      block = $0 "\n"
+      next
+    }
+    capture {
+      block = block $0 "\n"
+    }
+    capture && $0 == "      ports:" {
+      expected = "        - podSelector:\n" \
+        "            matchLabels:\n" \
+        "              cnpg.io/cluster: " cluster "\n" \
+        "      ports:\n"
+      if (block == expected) {
+        found = 1
+      }
+      capture = 0
+    }
+    END { if (!found) exit 1 }
+  ' "${manifest}" ||
+    fail "expected a cluster-only CNPG peer selector for ${cluster}"
+}
+
 extract_policy() {
   local manifest="$1"
   local policy_name="$2"
@@ -96,8 +133,13 @@ assert_contains "${processor_policy}" "app.kubernetes.io/instance: test-traefik-
 assert_contains "${processor_policy}" "port: 8080"
 assert_absent "${processor_policy}" "test-gatus"
 
-assert_contains "${cnpg_policy}" "cnpg.io/cluster: b2-share-broker-pg"
-assert_contains "${cnpg_policy}" "cnpg.io/podRole: instance"
+# The target remains instance-only, but the peer must admit every workload in
+# this CNPG cluster, including join jobs with jobRole and cluster instance labels.
+assert_cluster_only_cnpg_peer "${cnpg_policy}" b2-share-broker-pg
+assert_occurrence_count "${cnpg_policy}" "cnpg.io/cluster: b2-share-broker-pg" 2
+assert_occurrence_count "${cnpg_policy}" "cnpg.io/podRole: instance" 1
+assert_occurrence_count "${cnpg_policy}" "app.kubernetes.io/instance: policy-test" 3
+assert_absent "${cnpg_policy}" "cnpg.io/cluster: unrelated-pg"
 assert_contains "${cnpg_policy}" "app.kubernetes.io/component: api"
 assert_contains "${cnpg_policy}" "app.kubernetes.io/component: processor"
 assert_contains "${cnpg_policy}" "kubernetes.io/metadata.name: test-cnpg-system"
