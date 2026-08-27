@@ -95,6 +95,34 @@ extract_policy() {
     fail "could not extract NetworkPolicy ${policy_name}"
 }
 
+extract_ingress_rule() {
+  local policy="$1"
+  local marker="$2"
+  local output="$3"
+  awk -v marker="${marker}" '
+    function finish_rule() {
+      if (capture && index(block, marker)) {
+        print block
+        found = 1
+      }
+    }
+    $0 == "    - from:" {
+      finish_rule()
+      capture = 1
+      block = $0 "\n"
+      next
+    }
+    capture {
+      block = block $0 "\n"
+    }
+    END {
+      finish_rule()
+      if (!found) exit 1
+    }
+  ' "${policy}" > "${output}" ||
+    fail "could not extract ingress rule containing ${marker}"
+}
+
 default_render="${render_dir}/default.yaml"
 enabled_render="${render_dir}/enabled.yaml"
 without_processor_render="${render_dir}/without-processor.yaml"
@@ -113,9 +141,18 @@ assert_absent "${enabled_render}" "  egress:"
 api_policy="${render_dir}/api-policy.yaml"
 processor_policy="${render_dir}/processor-policy.yaml"
 cnpg_policy="${render_dir}/cnpg-policy.yaml"
+application_database_rule="${render_dir}/application-database-rule.yaml"
+cnpg_peer_rule="${render_dir}/cnpg-peer-rule.yaml"
+cnpg_operator_rule="${render_dir}/cnpg-operator-rule.yaml"
 extract_policy "${enabled_render}" b2-share-broker-api-ingress "${api_policy}"
 extract_policy "${enabled_render}" b2-share-processor-ingress "${processor_policy}"
 extract_policy "${enabled_render}" b2-share-broker-pg-ingress "${cnpg_policy}"
+extract_ingress_rule "${cnpg_policy}" \
+  "app.kubernetes.io/component: api" "${application_database_rule}"
+extract_ingress_rule "${cnpg_policy}" \
+  "cnpg.io/cluster: b2-share-broker-pg" "${cnpg_peer_rule}"
+extract_ingress_rule "${cnpg_policy}" \
+  "kubernetes.io/metadata.name: test-cnpg-system" "${cnpg_operator_rule}"
 
 assert_contains "${api_policy}" "app.kubernetes.io/instance: policy-test"
 assert_contains "${api_policy}" "app.kubernetes.io/component: api"
@@ -142,6 +179,21 @@ assert_occurrence_count "${cnpg_policy}" "app.kubernetes.io/instance: policy-tes
 assert_absent "${cnpg_policy}" "cnpg.io/cluster: unrelated-pg"
 assert_contains "${cnpg_policy}" "app.kubernetes.io/component: api"
 assert_contains "${cnpg_policy}" "app.kubernetes.io/component: processor"
+assert_contains "${application_database_rule}" "app.kubernetes.io/component: api"
+assert_contains "${application_database_rule}" "app.kubernetes.io/component: processor"
+assert_occurrence_count "${application_database_rule}" "port: 5432" 1
+assert_occurrence_count "${application_database_rule}" "port:" 1
+assert_absent "${application_database_rule}" "port: 8000"
+assert_occurrence_count "${cnpg_peer_rule}" "cnpg.io/cluster: b2-share-broker-pg" 1
+assert_occurrence_count "${cnpg_peer_rule}" "port: 5432" 1
+assert_occurrence_count "${cnpg_peer_rule}" "port: 8000" 1
+assert_occurrence_count "${cnpg_peer_rule}" "port:" 2
+assert_absent "${cnpg_peer_rule}" "app.kubernetes.io/component:"
+assert_absent "${cnpg_peer_rule}" "app.kubernetes.io/instance:"
+assert_absent "${cnpg_peer_rule}" "cnpg.io/podRole:"
+assert_occurrence_count "${cnpg_operator_rule}" "port: 5432" 1
+assert_occurrence_count "${cnpg_operator_rule}" "port: 8000" 1
+assert_occurrence_count "${cnpg_operator_rule}" "port:" 2
 assert_contains "${cnpg_policy}" "kubernetes.io/metadata.name: test-cnpg-system"
 assert_contains "${cnpg_policy}" "app.kubernetes.io/instance: test-cnpg-operator"
 assert_contains "${cnpg_policy}" "kubernetes.io/metadata.name: test-monitoring"
