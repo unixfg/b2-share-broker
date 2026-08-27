@@ -1,0 +1,118 @@
+{{- if .Values.networkPolicy.enabled -}}
+{{- $sources := .Values.networkPolicy.trustedSources -}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Chart.Name }}-api-ingress
+  namespace: {{ include "b2-share-broker.namespace" . }}
+  labels:
+    {{- include "b2-share-broker.labels" . | nindent 4 }}
+    app.kubernetes.io/component: network-policy
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Chart.Name }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: api
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            {{- required "networkPolicy.trustedSources.traefik.namespaceSelector is required when networkPolicy.enabled is true" $sources.traefik.namespaceSelector | toYaml | nindent 12 }}
+          podSelector:
+            {{- required "networkPolicy.trustedSources.traefik.podSelector is required when networkPolicy.enabled is true" $sources.traefik.podSelector | toYaml | nindent 12 }}
+        - namespaceSelector:
+            {{- required "networkPolicy.trustedSources.gatus.namespaceSelector is required when networkPolicy.enabled is true" $sources.gatus.namespaceSelector | toYaml | nindent 12 }}
+          podSelector:
+            {{- required "networkPolicy.trustedSources.gatus.podSelector is required when networkPolicy.enabled is true" $sources.gatus.podSelector | toYaml | nindent 12 }}
+      ports:
+        - port: 8080
+          protocol: TCP
+{{- if .Values.processor.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "b2-share-broker.shortName" . }}-processor-ingress
+  namespace: {{ include "b2-share-broker.namespace" . }}
+  labels:
+    {{- include "b2-share-broker.labels" . | nindent 4 }}
+    app.kubernetes.io/component: network-policy
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Chart.Name }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: processor
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            {{- required "networkPolicy.trustedSources.traefik.namespaceSelector is required when networkPolicy.enabled is true" $sources.traefik.namespaceSelector | toYaml | nindent 12 }}
+          podSelector:
+            {{- required "networkPolicy.trustedSources.traefik.podSelector is required when networkPolicy.enabled is true" $sources.traefik.podSelector | toYaml | nindent 12 }}
+      ports:
+        - port: 8080
+          protocol: TCP
+{{- end }}
+{{- if .Values.cnpg.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Chart.Name }}-pg-ingress
+  namespace: {{ include "b2-share-broker.namespace" . }}
+  labels:
+    {{- include "b2-share-broker.labels" . | nindent 4 }}
+    app.kubernetes.io/component: network-policy
+spec:
+  podSelector:
+    matchLabels:
+      cnpg.io/cluster: {{ .Chart.Name }}-pg
+      cnpg.io/podRole: instance
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ .Chart.Name }}
+              app.kubernetes.io/instance: {{ .Release.Name }}
+              app.kubernetes.io/component: api
+        {{- if .Values.processor.enabled }}
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ .Chart.Name }}
+              app.kubernetes.io/instance: {{ .Release.Name }}
+              app.kubernetes.io/component: processor
+        {{- end }}
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/instance: {{ .Release.Name }}
+              cnpg.io/cluster: {{ .Chart.Name }}-pg
+              cnpg.io/podRole: instance
+      ports:
+        - port: 5432
+          protocol: TCP
+    - from:
+        - namespaceSelector:
+            {{- required "networkPolicy.trustedSources.cnpgOperator.namespaceSelector is required when networkPolicy.enabled and cnpg.enabled are true" $sources.cnpgOperator.namespaceSelector | toYaml | nindent 12 }}
+          podSelector:
+            {{- required "networkPolicy.trustedSources.cnpgOperator.podSelector is required when networkPolicy.enabled and cnpg.enabled are true" $sources.cnpgOperator.podSelector | toYaml | nindent 12 }}
+      ports:
+        - port: 8000
+          protocol: TCP
+        - port: 5432
+          protocol: TCP
+    - from:
+        - namespaceSelector:
+            {{- required "networkPolicy.trustedSources.prometheus.namespaceSelector is required when networkPolicy.enabled and cnpg.enabled are true" $sources.prometheus.namespaceSelector | toYaml | nindent 12 }}
+          podSelector:
+            {{- required "networkPolicy.trustedSources.prometheus.podSelector is required when networkPolicy.enabled and cnpg.enabled are true" $sources.prometheus.podSelector | toYaml | nindent 12 }}
+      ports:
+        - port: 9187
+          protocol: TCP
+{{- end }}
+{{- end }}

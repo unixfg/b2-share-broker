@@ -116,7 +116,8 @@ For chart changes, run:
 
 ```bash
 helm lint chart/
-helm template b2-share-broker chart/ > /tmp/b2-share-broker-rendered.yaml
+helm lint chart/ --set networkPolicy.enabled=true
+bash chart/tests/render-test.sh
 ```
 
 Increment `version` in `chart/Chart.yaml` whenever templates change. CI
@@ -124,8 +125,9 @@ publishes the packaged chart to `oci://ghcr.io/unixfg` on pushes to `main`.
 
 ## CI Artifacts
 
-Pull requests run Go tests, build the broker, lint the chart, and render the
-chart. Pushes to `main` also publish:
+Pull requests run Go tests, build the broker, lint both NetworkPolicy modes,
+and test the disabled, enabled, and component-gated chart renders. Pushes to
+`main` also publish:
 
 - the `ghcr.io/unixfg/b2-share-broker:main` image;
 - a `:sha-<commit>` image tag;

@@ -33,9 +33,11 @@ jobs:
       - name: Setup Helm
         uses: azure/setup-helm@v4
       - name: Lint chart
-        run: helm lint chart/
-      - name: Template chart
-        run: helm template chart/ > /dev/null
+        run: |
+          helm lint chart/
+          helm lint chart/ --set networkPolicy.enabled=true
+      - name: Test chart renders
+        run: bash chart/tests/render-test.sh
 
   image:
     runs-on: ubuntu-latest
