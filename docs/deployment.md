@@ -189,11 +189,11 @@ as needed. The chart upload limit is 2 GiB and the processor allows two-hour
 HTTP reads and writes, but an ingress controller can reject or time out the
 request earlier.
 
-Install chart version `0.1.3`:
+Install chart version `0.1.4`:
 
 ```bash
 helm install b2-share-broker oci://ghcr.io/unixfg/b2-share-broker \
-  --version 0.1.3 \
+  --version 0.1.4 \
   --namespace b2-share-broker \
   -f values.yaml
 ```
@@ -213,8 +213,9 @@ chart-managed CloudNativePG instance pods. The enabled policies permit only:
 
 - Traefik and Gatus to reach the API on TCP 8080;
 - Traefik to reach the processor on TCP 8080;
-- same-release application pods and same-cluster CNPG workloads to reach
-  PostgreSQL on TCP 5432;
+- same-release application pods to reach PostgreSQL on TCP 5432;
+- same-cluster CNPG workloads to reach PostgreSQL on TCP 5432 and the
+  instance-manager failsafe endpoint on TCP 8000;
 - the CloudNativePG operator to reach database pods on TCP 8000 and 5432; and
 - Prometheus to scrape CNPG metrics on TCP 9187.
 

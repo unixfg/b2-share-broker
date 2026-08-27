@@ -26,7 +26,7 @@ set `namespace.create: false` in that file.
 
 ```bash
 helm install b2-share-broker oci://ghcr.io/unixfg/b2-share-broker \
-  --version 0.1.3 \
+  --version 0.1.4 \
   --namespace b2-share-broker \
   -f values.yaml
 ```
@@ -93,7 +93,7 @@ policies with these boundaries:
 |---|---|
 | Same-release API pods | Trusted Traefik and Gatus pods on TCP 8080 |
 | Same-release processor pods | Trusted Traefik pods on TCP 8080 |
-| `b2-share-broker-pg` CNPG instances | Same-release API and processor pods plus same-cluster CNPG workloads on TCP 5432; trusted CNPG operator pods on TCP 8000 and 5432; trusted Prometheus pods on TCP 9187 |
+| `b2-share-broker-pg` CNPG instances | Same-release API and processor pods on TCP 5432; same-cluster CNPG workloads on TCP 5432 and instance-manager failsafe TCP 8000; trusted CNPG operator pods on TCP 8000 and 5432; trusted Prometheus pods on TCP 9187 |
 
 The processor and database policies render only when their corresponding
 components are enabled. These policies do not select egress traffic.

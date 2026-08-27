@@ -88,11 +88,17 @@ spec:
               app.kubernetes.io/instance: {{ .Release.Name }}
               app.kubernetes.io/component: processor
         {{- end }}
+      ports:
+        - port: 5432
+          protocol: TCP
+    - from:
         - podSelector:
             matchLabels:
               cnpg.io/cluster: {{ .Chart.Name }}-pg
       ports:
         - port: 5432
+          protocol: TCP
+        - port: 8000
           protocol: TCP
     - from:
         - namespaceSelector:
