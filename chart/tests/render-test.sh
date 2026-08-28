@@ -132,6 +132,10 @@ missing_selector_log="${render_dir}/missing-selector.log"
 
 render > "${default_render}"
 assert_policy_count "${default_render}" 0
+assert_contains "${default_render}" "helm.sh/chart: b2-share-broker-0.1.5"
+assert_occurrence_count "${default_render}" "type: RuntimeDefault" 2
+assert_contains "${default_render}" $'      securityContext:\n        seccompProfile:\n          type: RuntimeDefault\n      topologySpreadConstraints:'
+assert_contains "${default_render}" $'      securityContext:\n        fsGroup: 65532\n        fsGroupChangePolicy: OnRootMismatch\n        seccompProfile:\n          type: RuntimeDefault\n      containers:'
 
 render -f "${script_dir}/networkpolicy-values.yaml" > "${enabled_render}"
 assert_policy_count "${enabled_render}" 3

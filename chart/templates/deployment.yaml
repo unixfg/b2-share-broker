@@ -28,6 +28,9 @@ spec:
     spec:
       automountServiceAccountToken: false
       enableServiceLinks: false
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
       {{- with .Values.broker.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
