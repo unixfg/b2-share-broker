@@ -53,6 +53,16 @@ assert_occurrence_count() {
     fail "expected '${expected}' ${count} times in ${manifest}, found ${actual}"
 }
 
+assert_line_count() {
+  local manifest="$1"
+  local expected="$2"
+  local count="$3"
+  local actual
+  actual="$(grep -Fxc -- "${expected}" "${manifest}" || true)"
+  [[ "${actual}" == "${count}" ]] ||
+    fail "expected exact line '${expected}' ${count} times in ${manifest}, found ${actual}"
+}
+
 assert_cluster_only_cnpg_peer() {
   local manifest="$1"
   local cluster="$2"
@@ -132,10 +142,14 @@ missing_selector_log="${render_dir}/missing-selector.log"
 
 render > "${default_render}"
 assert_policy_count "${default_render}" 0
-assert_contains "${default_render}" "helm.sh/chart: b2-share-broker-0.1.5"
-assert_occurrence_count "${default_render}" "type: RuntimeDefault" 2
-assert_contains "${default_render}" $'      securityContext:\n        seccompProfile:\n          type: RuntimeDefault\n      topologySpreadConstraints:'
-assert_contains "${default_render}" $'      securityContext:\n        fsGroup: 65532\n        fsGroupChangePolicy: OnRootMismatch\n        seccompProfile:\n          type: RuntimeDefault\n      containers:'
+assert_contains "${default_render}" "helm.sh/chart: b2-share-broker-0.1.6"
+assert_occurrence_count "${default_render}" "type: RuntimeDefault" 4
+assert_line_count "${default_render}" "        seccompProfile:" 2
+assert_line_count "${default_render}" "          type: RuntimeDefault" 2
+assert_line_count "${default_render}" "          securityContext:" 2
+assert_line_count "${default_render}" "            seccompProfile:" 2
+assert_line_count "${default_render}" "              type: RuntimeDefault" 2
+assert_line_count "${default_render}" "            runAsNonRoot: true" 2
 
 render -f "${script_dir}/networkpolicy-values.yaml" > "${enabled_render}"
 assert_policy_count "${enabled_render}" 3

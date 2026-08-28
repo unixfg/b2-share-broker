@@ -26,7 +26,7 @@ set `namespace.create: false` in that file.
 
 ```bash
 helm install b2-share-broker oci://ghcr.io/unixfg/b2-share-broker \
-  --version 0.1.5 \
+  --version 0.1.6 \
   --namespace b2-share-broker \
   -f values.yaml
 ```
@@ -35,9 +35,10 @@ The defaults contain empty public URL, OIDC issuer, backup destination, backup
 endpoint, and storage-class values. They are not a ready-to-run production
 configuration.
 
-The broker and processor pods use the runtime-default seccomp profile. Their
-containers also run as UID/GID 65532 with privilege escalation disabled, a
-read-only root filesystem, and all Linux capabilities dropped.
+The broker and processor set the runtime-default seccomp profile at both pod
+and container scope. Their containers also run as UID/GID 65532 with privilege
+escalation disabled, a read-only root filesystem, and all Linux capabilities
+dropped.
 
 ## Required Secrets
 

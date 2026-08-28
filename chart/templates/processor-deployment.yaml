@@ -131,6 +131,8 @@ spec:
             {{- end }}
             {{- toYaml $resources | nindent 12 }}
           securityContext:
+            seccompProfile:
+              type: RuntimeDefault
             runAsNonRoot: true
             runAsUser: 65532
             runAsGroup: 65532

@@ -125,6 +125,8 @@ spec:
           resources:
             {{- toYaml .Values.broker.resources | nindent 12 }}
           securityContext:
+            seccompProfile:
+              type: RuntimeDefault
             runAsNonRoot: true
             runAsUser: 65532
             runAsGroup: 65532
