@@ -189,11 +189,11 @@ as needed. The chart upload limit is 2 GiB and the processor allows two-hour
 HTTP reads and writes, but an ingress controller can reject or time out the
 request earlier.
 
-Install chart version `0.1.5`:
+Install chart version `0.1.6`:
 
 ```bash
 helm install b2-share-broker oci://ghcr.io/unixfg/b2-share-broker \
-  --version 0.1.5 \
+  --version 0.1.6 \
   --namespace b2-share-broker \
   -f values.yaml
 ```
