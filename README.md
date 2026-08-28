@@ -11,7 +11,7 @@
 <p align="center">
   <a href="https://github.com/unixfg/b2-share-broker/actions/workflows/ci.yaml"><img src="https://github.com/unixfg/b2-share-broker/actions/workflows/ci.yaml/badge.svg" alt="CI status"></a>
   <a href="https://github.com/unixfg/b2-share-broker/pkgs/container/b2-share-broker"><img src="https://img.shields.io/badge/container-ghcr.io-2496ED?logo=docker&logoColor=white" alt="Container image"></a>
-  <a href="https://github.com/unixfg/b2-share-broker/tree/main/chart"><img src="https://img.shields.io/badge/Helm-0.1.4-0F1689?logo=helm&logoColor=white" alt="Helm chart 0.1.4"></a>
+  <a href="https://github.com/unixfg/b2-share-broker/tree/main/chart"><img src="https://img.shields.io/badge/Helm-0.1.5-0F1689?logo=helm&logoColor=white" alt="Helm chart 0.1.5"></a>
   <img src="https://img.shields.io/badge/Go-1.25-00ADD8?logo=go&logoColor=white" alt="Go 1.25">
 </p>
 
@@ -102,7 +102,7 @@ CloudNativePG cluster.
 
 ```bash
 helm install b2-share-broker oci://ghcr.io/unixfg/b2-share-broker \
-  --version 0.1.4 \
+  --version 0.1.5 \
   --namespace b2-share-broker \
   --set namespace.create=false \
   -f values.yaml
