@@ -66,6 +66,11 @@ Notes:
 
 ## CI/CD and deployment
 
+- Linux jobs use `[self-hosted, Linux, X64, workstation-ci]` on the shared
+  workstation CI account. All outside fork contributors require workflow
+  approval before their code may run there. Runner installation and operation
+  are maintained in `unixfg/gitops/docs/WORKSTATION-RUNNER.md`.
+
 1. PR into `main` (squash merge). CI runs tests, lints the chart with
    NetworkPolicies disabled and enabled, and exercises the chart render test
    matrix; image and chart builds only run on `main` pushes and publish:

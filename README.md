@@ -28,6 +28,8 @@ bearer tokens.
 > Share links are unlisted, not private. Anyone with a `/s/{slug}/` URL can open
 > it without authentication.
 
+CI uses the shared `workstation-ci` Linux runner. Outside fork pull requests require workflow approval before running on the workstation.
+
 ## Why B2 Share?
 
 - **Stable permalinks** keep working after a share is renamed.
