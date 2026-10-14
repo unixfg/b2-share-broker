@@ -28,7 +28,7 @@ bearer tokens.
 > Share links are unlisted, not private. Anyone with a `/s/{slug}/` URL can open
 > it without authentication.
 
-CI uses the shared `workstation-ci` Linux runner. Outside fork pull requests require workflow approval before running on the workstation.
+CI uses GitHub-hosted Ubuntu 24.04 runners. Existing outside-fork workflow approval requirements remain in place.
 
 ## Why B2 Share?
 
