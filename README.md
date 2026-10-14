@@ -30,6 +30,16 @@ bearer tokens.
 
 CI uses GitHub-hosted Ubuntu 24.04 runners. Existing outside-fork workflow approval requirements remain in place.
 
+[Renovate](renovate.json) manages Go modules and toolchains, Dockerfile and Compose
+base images, and GitHub Actions. Routine updates run daily between midnight and
+noon in America/Chicago, with two concurrent PRs and four new PRs per hour. Patch,
+minor, and image digest updates may squash-merge after required CI passes; major
+updates need manual review. The repository's own `:main` image follows publication
+and is excluded from dependency updates. Keep GitHub's dependency graph and
+Dependabot alerts enabled and grant the Renovate App repository access and alert
+read permission so security fixes can bypass the schedule; security majors remain
+manual.
+
 ## Why B2 Share?
 
 - **Stable permalinks** keep working after a share is renamed.

@@ -87,6 +87,22 @@ Notes:
    `:sha-<merge commit>`. Bump `version` in `chart/Chart.yaml` when chart
    templates change so the chart artifact republishes.
 
+## Dependency automation
+
+- `renovate.json` owns scheduled dependency updates for Go modules/toolchains,
+  Dockerfile and Compose images, and GitHub Actions. Updates run daily from
+  midnight to noon in America/Chicago, limited to two concurrent PRs and four
+  new PRs per hour.
+- Routine patch/minor/digest updates may squash-merge after the required `test`
+  check; majors remain manual. Preserve this repository's squash-merge policy.
+- Group the Go module requirement with the Docker build toolchain. The Compose
+  references to this repository's `:main` image follow publication and must stay
+  excluded from update discovery. Chart versioning remains owned by its release
+  workflow; do not invent Helm chart dependencies.
+- Keep GitHub's dependency graph and Dependabot alerts enabled. The Renovate App
+  needs repository access and alert-read permission for security fixes outside
+  the ordinary update schedule.
+
 ## Database conventions
 
 - Migrations run at every pod startup (`runMigrations`, advisory-locked,
