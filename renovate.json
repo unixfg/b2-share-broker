@@ -1,0 +1,114 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":dependencyDashboard",
+    ":semanticCommits"
+  ],
+  "timezone": "America/Chicago",
+  "schedule": [
+    "* 0-11 * * *"
+  ],
+  "updateNotScheduled": false,
+  "automerge": false,
+  "automergeType": "pr",
+  "automergeStrategy": "squash",
+  "platformAutomerge": true,
+  "rebaseWhen": "conflicted",
+  "ignoreTests": false,
+  "internalChecksFilter": "strict",
+  "prHourlyLimit": 4,
+  "prConcurrentLimit": 2,
+  "labels": [
+    "dependencies"
+  ],
+  "vulnerabilityAlerts": {
+    "enabled": true,
+    "addLabels": [
+      "security"
+    ],
+    "schedule": [],
+    "minimumReleaseAge": null,
+    "updateNotScheduled": true,
+    "groupName": null
+  },
+  "packageRules": [
+    {
+      "description": "Group routine GitHub Actions updates",
+      "matchManagers": [
+        "github-actions"
+      ],
+      "matchUpdateTypes": [
+        "digest",
+        "pinDigest",
+        "patch",
+        "minor"
+      ],
+      "groupName": "github-actions"
+    },
+    {
+      "description": "Keep the Go module requirement and Docker build toolchain together",
+      "matchPackageNames": [
+        "go",
+        "golang"
+      ],
+      "matchUpdateTypes": [
+        "patch",
+        "minor",
+        "digest",
+        "pinDigest"
+      ],
+      "groupName": "go toolchain"
+    },
+    {
+      "description": "Update the minimum Go version with the grouped build toolchain",
+      "matchManagers": [
+        "gomod"
+      ],
+      "matchDepTypes": [
+        "golang"
+      ],
+      "rangeStrategy": "bump"
+    },
+    {
+      "description": "The local Compose stack follows the image published by this repository",
+      "matchPackageNames": [
+        "ghcr.io/unixfg/b2-share-broker"
+      ],
+      "enabled": false
+    },
+    {
+      "description": "Auto-merge routine updates after required CI passes",
+      "matchUpdateTypes": [
+        "patch",
+        "minor",
+        "digest",
+        "pinDigest"
+      ],
+      "automerge": true
+    },
+    {
+      "description": "Keep major updates separate and require manual merging",
+      "matchUpdateTypes": [
+        "major"
+      ],
+      "groupName": null,
+      "automerge": false,
+      "addLabels": [
+        "major-update"
+      ]
+    }
+  ],
+  "enabledManagers": [
+    "gomod",
+    "dockerfile",
+    "docker-compose",
+    "github-actions"
+  ],
+  "gomod": {
+    "constraintsFiltering": "strict",
+    "postUpdateOptions": [
+      "gomodTidy"
+    ]
+  }
+}
