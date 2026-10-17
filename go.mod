@@ -1,6 +1,6 @@
 module github.com/unixfg/b2-share-broker
 
-go 1.25.0
+go 1.27.2
 
 require (
 	github.com/aws/aws-sdk-go-v2 v1.42.0
